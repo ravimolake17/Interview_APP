@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; background: #f5f7fb; font-family: Arial, Helvetica, sans-serif; line-height: 1.6; color: #1f2937; }
+    .wrapper { max-width: 680px; margin: 0 auto; padding: 24px 12px; }
+    .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 20px; overflow: hidden; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); }
+    .topbar { background: linear-gradient(90deg, #059669 0%, #047857 100%); height: 8px; }
+    .header { padding: 28px 32px 12px; text-align: center; }
+    .logo { max-width: 220px; width: 100%; height: auto; margin-bottom: 16px; }
+    .title { font-size: 26px; font-weight: 700; color: #111827; margin: 0; }
+    .subtitle { color: #6b7280; font-size: 14px; margin: 10px 0 0; }
+    .content { padding: 8px 32px 24px; }
+    .details { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 14px; padding: 18px; margin: 20px 0; }
+    .details h3 { margin: 0 0 12px; color: #065f46; font-size: 16px; }
+    .detail-row { margin: 10px 0; }
+    .detail-label { font-weight: 700; color: #065f46; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .detail-value { color: #111827; margin: 4px 0 0; font-size: 15px; }
+    .highlight { background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 14px; padding: 16px 18px; margin: 20px 0; color: #065f46; }
+    .cta-wrap { text-align: center; margin: 28px 0 20px; }
+    .button { display: inline-block; background: linear-gradient(90deg, #059669 0%, #047857 100%); color: #ffffff !important; padding: 14px 28px;
+              text-decoration: none; border-radius: 999px; font-weight: 700; }
+    .linkbox { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; word-break: break-all; font-size: 13px; }
+    .linkbox a { color: #047857; }
+    .note { font-size: 12px; color: #6b7280; margin-top: 12px; }
+    .footer { padding: 22px 32px 28px; font-size: 12px; color: #6b7280; border-top: 1px solid #f1f5f9; text-align: center; }
+    .footer strong { color: #111827; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+      <div class="topbar"></div>
+      <div class="header">
+        {% if logo_data_uri %}
+        <img class="logo" src="{{ logo_data_uri }}" alt="{{ company_name }} logo">
+        {% endif %}
+        <h1 class="title">Interview scheduled</h1>
+        <p class="subtitle">Your interview confirmation from {{ company_name }}</p>
+      </div>
+      <div class="content">
+        <p>Dear {{ candidate_name }},</p>
+        <p>Your interview has been scheduled successfully{% if job_position %} for the <strong>{{ job_position }}</strong> role{% endif %}.</p>
+
+        <div class="details">
+          <h3>Interview details</h3>
+          <div class="detail-row">
+            <div class="detail-label">Date</div>
+            <div class="detail-value">{{ interview_date }}</div>
+          </div>
+          <div class="detail-row">
+            <div class="detail-label">Time</div>
+            <div class="detail-value">{{ interview_time }}</div>
+          </div>
+        </div>
+
+        {% if join_link %}
+        <div class="highlight">
+          <strong>When to join:</strong> the interview room opens <strong>5 minutes before</strong> your scheduled time. Early access is not available. Complete identity verification when you enter, then your interview begins.
+        </div>
+
+        <div class="cta-wrap">
+          <a href="{{ join_link }}" class="button">Open interview room</a>
+        </div>
+
+        <p>If the button does not open, copy and paste this link into your browser at the allowed time:</p>
+        <div class="linkbox">
+          <a href="{{ join_link }}">{{ join_link }}</a>
+        </div>
+        <p class="note">Keep this email. Join from a quiet, well-lit space. The room will not open until 5 minutes before your slot.</p>
+        {% else %}
+        <div class="highlight">
+          <strong>Note:</strong> your join link could not be generated. Please contact HR or open the scheduling success page again.
+        </div>
+        {% endif %}
+
+        <p>Regards,<br><strong>HR Team</strong><br>{{ company_name }}</p>
+      </div>
+      <div class="footer">
+        This is an automated message from <strong>{{ company_name }}</strong>. Please do not reply to this email directly.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

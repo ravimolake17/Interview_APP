@@ -1,0 +1,7 @@
+# DEPRECATED — Agent 5 dependencies are now included in requirements.txt.
+# Install once from the backend folder:
+#   pip install -r requirements.txt
+#
+# This file is kept only so old docs/scripts that reference it still resolve.
+# Prefer requirements.txt for all new setups.
+-r requirements.txt

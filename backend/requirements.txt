@@ -1,0 +1,85 @@
+# Agentic HR Recruitment System — unified dependencies
+
+# Web framework
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+python-multipart==0.0.20
+
+# Configuration and validation
+pydantic[email]==2.13.4
+pydantic-settings==2.14.2
+python-dotenv==1.1.1
+
+# Database (Agent 2)
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+psycopg2-binary==2.9.10
+# LangGraph AsyncPostgresSaver needs psycopg v3 (not psycopg2)
+psycopg[binary]>=3.2.0,<4
+
+# LangGraph (Agent 2)
+langgraph==0.2.60
+langgraph-checkpoint-postgres>=2.0.0,<3
+langchain-core==0.3.28
+
+# Templates
+jinja2==3.1.4
+
+# AI — Agent 1 (optional Groq) + Agent 4 STT (Whisper via Groq)
+groq==1.5.0
+# Agent 4 TTS — Edge (fast CPU) + optional Indic Parler-TTS (GPU)
+edge-tts>=6.1.0
+miniaudio>=1.59
+git+https://github.com/huggingface/parler-tts.git
+accelerate>=0.34.0
+sentencepiece>=0.2.0
+soundfile>=0.13.1
+huggingface_hub>=0.26.0
+# torch / torchvision for Agent 1 embeddings, Agent 4 TTS, and Agent 5 (CPU wheels below)
+# Keep torchvision on the same PyTorch release (torch 2.6.x -> torchvision 0.21.x).
+# torchvision 0.28 with torch 2.6 breaks transformers: operator torchvision::nms does not exist.
+
+# Document extraction — Agent 1
+docling[easyocr]==2.107.0
+pypdfium2>=4.30.0,<6.0.0,!=4.30.1
+python-docx>=1.1.0
+# Semantic skill matching (BGE-M3) + Chroma vector memory
+FlagEmbedding>=1.2.10
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+chromadb>=1.0.0
+# Docling layout model needs rt_detr_v2 (transformers 4.51+). Stay below 5.x for FlagEmbedding / parler-tts.
+transformers>=4.51.0,<5.0.0
+
+# Authentication
+PyJWT==2.10.1
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+
+# Agent 5 — Fraud detection / proctoring (same install as other agents)
+# Python 3.11 recommended for the AI stack. CPU torch wheels:
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu
+torchvision==0.21.0+cpu
+torchaudio==2.6.0+cpu
+opencv-python-headless==4.10.0.84
+mediapipe==0.10.35
+scipy==1.15.3
+librosa==0.11.0
+# soundfile already listed above for Agent 4 TTS
+speechbrain==1.1.0
+silero-vad==6.2.1
+reportlab==4.4.9
+psutil==7.0.0
+argon2-cffi==25.1.0
+cryptography>=42.0.0
+imageio-ffmpeg==0.6.0
+# ffmpeg/ffprobe: system PATH, AGENT5_FFMPEG_PATH, or imageio-ffmpeg wheel
+# Models: python -m scripts.agent5.prepare_models (from backend/)
+
+# Testing
+pytest==8.4.1
+pytest-asyncio==1.1.0
+httpx==0.28.1
+ruff==0.12.3

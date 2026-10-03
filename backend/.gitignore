@@ -1,0 +1,8 @@
+
+# Pre-generated Kokoro TTS audio
+storage/tts_audio/
+# Per-question oral interview answers
+storage/interview_answers/
+# ChromaDB vector memory (Agents 1/4/6/7)
+storage/chroma/
+

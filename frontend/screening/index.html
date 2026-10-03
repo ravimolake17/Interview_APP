@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1"
+  >
+
+  <title>Resume Screening ATS</title>
+
+  <link
+    rel="stylesheet"
+    href="styles.css"
+  >
+</head>
+
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">
+          Recruiter Workspace
+        </p>
+
+        <h1>
+          Resume Screening ATS
+        </h1>
+
+        <p class="subtitle">
+          Parse a resume, compare it with a job description,
+          and review an explainable score.
+        </p>
+      </div>
+
+      <a
+        id="docsLink"
+        class="docs-link"
+        href="/docs"
+        target="_blank"
+        rel="noreferrer"
+      >
+        API Docs
+      </a>
+    </header>
+
+    <section class="input-grid">
+      <article class="panel">
+        <div class="step">
+          1
+        </div>
+
+        <h2>
+          Candidate Resume
+        </h2>
+
+        <label
+          class="file-drop"
+          for="resumeFile"
+        >
+          <span id="fileLabel">
+            Choose a PDF or DOCX resume
+          </span>
+
+          <input
+            id="resumeFile"
+            type="file"
+            accept=".pdf,.docx"
+          >
+        </label>
+
+        <p class="hint">
+          Maximum upload size is configured by the backend.
+        </p>
+      </article>
+
+      <article class="panel">
+        <div class="step">
+          2
+        </div>
+
+        <h2>
+          Job Description
+        </h2>
+
+        <div class="jd-upload-box">
+          <label
+            class="file-drop compact"
+            for="jdFile"
+          >
+            <span id="jdFileLabel">
+              Choose JD PDF or DOCX file
+            </span>
+
+            <input
+              id="jdFile"
+              type="file"
+              accept=".pdf,.docx"
+            >
+          </label>
+
+          <p class="hint">
+            Upload a JD document here, or paste the job description below.
+          </p>
+        </div>
+
+        <textarea
+          id="jdText"
+          rows="14"
+          maxlength="100000"
+          placeholder="Paste the complete job description here..."
+        ></textarea>
+      </article>
+    </section>
+
+    <div class="action-row">
+      <button
+        id="evaluateBtn"
+        type="button"
+      >
+        Evaluate Candidate
+      </button>
+
+      <p
+        id="statusText"
+        role="status"
+        aria-live="polite"
+      ></p>
+    </div>
+
+    <section
+      id="results"
+      class="results hidden"
+      aria-live="polite"
+    >
+      <div class="summary-grid">
+        <article class="panel score-panel">
+          <div
+            id="scoreValue"
+            class="score"
+          >
+            0
+          </div>
+
+          <p>
+            Overall score
+          </p>
+
+          <span
+            id="decisionBadge"
+            class="badge"
+          >
+            Needs Review
+          </span>
+        </article>
+
+        <article class="panel candidate-panel">
+          <p class="eyebrow">
+            Candidate
+          </p>
+
+          <h2 id="candidateName">
+            Candidate
+          </h2>
+
+          <p
+            id="candidateContact"
+            class="muted"
+          ></p>
+
+          <p id="recommendation"></p>
+        </article>
+      </div>
+
+      <article class="panel">
+        <h2>
+          Score Breakdown
+        </h2>
+
+        <div
+          id="scoreBreakdown"
+          class="breakdown"
+        ></div>
+      </article>
+
+      <article class="panel">
+        <h2>
+          JD-Relevant Experience Match
+        </h2>
+
+        <div class="requirements-grid">
+          <div>
+            <strong>
+              JD requirement
+            </strong>
+
+            <p id="experienceRequirement">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Total experience
+            </strong>
+
+            <p id="totalExperience">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Relevant experience
+            </strong>
+
+            <p id="relevantExperience">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Experience result
+            </strong>
+
+            <p id="experienceResult">
+              —
+            </p>
+          </div>
+        </div>
+      </article>
+
+      <div class="two-column">
+        <article class="panel">
+          <h2>
+            Counted Experience
+          </h2>
+
+          <ul id="countedExperience"></ul>
+        </article>
+
+        <article class="panel">
+          <h2>
+            Excluded from Relevant Experience
+          </h2>
+
+          <ul id="excludedExperience"></ul>
+        </article>
+      </div>
+
+      <div class="two-column">
+        <article class="panel">
+          <h2>
+            Matched Skills
+          </h2>
+
+          <div
+            id="matchedSkills"
+            class="chips"
+          ></div>
+        </article>
+
+        <article class="panel">
+          <h2>
+            Missing Skills
+          </h2>
+
+          <div
+            id="missingSkills"
+            class="chips"
+          ></div>
+        </article>
+      </div>
+
+      <div class="two-column">
+        <article class="panel">
+          <h2>
+            Strengths
+          </h2>
+
+          <ul id="strengths"></ul>
+        </article>
+
+        <article class="panel">
+          <h2>
+            Concerns
+          </h2>
+
+          <ul id="concerns"></ul>
+        </article>
+      </div>
+
+      <article class="panel">
+        <h2>
+          JD Requirements
+        </h2>
+
+        <div class="requirements-grid">
+          <div>
+            <strong>
+              Role
+            </strong>
+
+            <p id="jobTitle">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Experience range
+            </strong>
+
+            <p id="minimumExperience">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Required match
+            </strong>
+
+            <p id="requiredRatio">
+              —
+            </p>
+          </div>
+
+          <div>
+            <strong>
+              Preferred match
+            </strong>
+
+            <p id="preferredRatio">
+              —
+            </p>
+          </div>
+        </div>
+      </article>
+
+      <article id="schedulingPanel" class="panel hidden">
+        <h2>
+          Interview Scheduling (Agent 2)
+        </h2>
+
+        <p id="schedulingMessage" class="hint">
+          —
+        </p>
+
+        <p>
+          <strong>Candidate ID:</strong>
+          <span id="schedulingCandidateId">—</span>
+        </p>
+
+        <p>
+          <strong>Scheduling link:</strong>
+          <a id="schedulingLink" href="#" target="_blank" rel="noreferrer">—</a>
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

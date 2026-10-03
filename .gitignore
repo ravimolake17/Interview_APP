@@ -1,0 +1,34 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# Dependencies
+node_modules/
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+token.json
+credentials.json
+
+# Build
+dist/
+build/
+*.egg-info/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local interview artifacts — do not ship to production git
+/storage/
+backend/_jd_debug.txt
+backend/agents/screening_agent/uploads/
+*.webm
+*.mp4

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; background: #f5f7fb; font-family: Arial, sans-serif; line-height: 1.6; color: #1f2937; }
+    .wrapper { max-width: 680px; margin: 0 auto; padding: 24px 12px; }
+    .card { background: #ffffff; border: 1px solid #e5e7eb; border-radius: 20px; overflow: hidden; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); }
+    .topbar { background: linear-gradient(90deg, #f97316 0%, #dc2626 100%); height: 8px; }
+    .header { padding: 28px 32px 12px; text-align: center; }
+    .logo { max-width: 220px; width: 100%; height: auto; margin-bottom: 16px; }
+    .title { font-size: 26px; font-weight: 700; color: #111827; margin: 0; }
+    .subtitle { color: #6b7280; font-size: 14px; margin: 10px 0 0; }
+    .content { padding: 8px 32px 24px; }
+    .highlight { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 14px; padding: 18px; margin: 20px 0; }
+    .cta-wrap { text-align: center; margin: 28px 0 20px; }
+    .button { display: inline-block; background: linear-gradient(90deg, #f97316 0%, #dc2626 100%); color: #ffffff !important; padding: 14px 28px;
+              text-decoration: none; border-radius: 999px; font-weight: 700; }
+    .linkbox { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; word-break: break-all; font-size: 13px; }
+    .footer { padding: 22px 32px 28px; font-size: 12px; color: #6b7280; border-top: 1px solid #f1f5f9; }
+    .footer strong { color: #111827; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+      <div class="topbar"></div>
+      <div class="header">
+        {% if logo_data_uri %}
+        <img class="logo" src="{{ logo_data_uri }}" alt="{{ company_name }} logo">
+        {% endif %}
+        <h1 class="title">Congratulations, you are shortlisted</h1>
+        <p class="subtitle">Interview scheduling invitation from {{ company_name }}</p>
+      </div>
+      <div class="content">
+        <p>Dear {{ candidate_name }},</p>
+        <p>Thank you for your application. Your resume has been shortlisted for the <strong>{{ job_position }}</strong> role.</p>
+
+        <div class="highlight">
+          <strong>Next step:</strong> please choose your interview slot using the secure scheduling link below.
+        </div>
+
+        <div class="cta-wrap">
+          <a class="button" href="{{ scheduling_link }}">Schedule Your Interview</a>
+        </div>
+
+        <p>If the button does not open, use this link:</p>
+        <div class="linkbox">
+          <a href="{{ scheduling_link }}">{{ scheduling_link }}</a>
+        </div>
+
+        <p><strong>This scheduling link is valid for 48 hours.</strong></p>
+        <p>Once you select a slot, that link cannot be reused to book another one.</p>
+        <p>Regards,<br><strong>HR Team</strong><br>{{ company_name }}</p>
+      </div>
+      <div class="footer">
+        This is an automated message from <strong>{{ company_name }}</strong>. Please do not reply to this email directly.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

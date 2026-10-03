@@ -1,0 +1,37 @@
+{
+  "name": "agent5-react-frontend",
+  "private": true,
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Agent5 candidate and admin interfaces built with React, TypeScript, and Vite",
+  "engines": {
+    "node": ">=18",
+    "npm": ">=9"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "node ./node_modules/typescript/bin/tsc -b && vite build",
+    "typecheck": "node ./node_modules/typescript/bin/tsc -b --pretty false",
+    "test": "vitest run --reporter=verbose",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "audit:prod": "npm audit --omit=dev",
+    "lint": "node scripts/lint.mjs",
+    "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "typescript": "6.0.3",
+    "vite": "8.1.5",
+    "@types/node": "22.19.19",
+    "fake-indexeddb": "6.2.5",
+    "jsdom": "29.1.1",
+    "vitest": "4.1.10"
+  }
+}
