@@ -28,14 +28,20 @@ jinja2==3.1.4
 
 # AI — Agent 1 (optional Groq) + Agent 4 STT (Whisper via Groq)
 groq==1.5.0
-# Agent 4 TTS — Edge (fast CPU) + optional Indic Parler-TTS (GPU)
+# Agent 4 TTS — Edge (fast CPU). Default for Azure VMs / production.
 edge-tts>=6.1.0
 miniaudio>=1.59
-git+https://github.com/huggingface/parler-tts.git
 accelerate>=0.34.0
 sentencepiece>=0.2.0
 soundfile>=0.13.1
 huggingface_hub>=0.26.0
+# Optional Indic Parler-TTS (needs NVIDIA CUDA + its own transformers pin).
+# Do NOT install with this file: parler-tts requires transformers==4.46.1,
+# while Docling needs transformers>=4.51. Use Edge TTS on CPU VMs:
+#   TTS_PROVIDER=edge
+# For a GPU box only, install separately after this file succeeds:
+#   pip install "git+https://github.com/huggingface/parler-tts.git"
+# (expect a transformers downgrade conflict — use a separate venv if needed)
 # torch / torchvision for Agent 1 embeddings, Agent 4 TTS, and Agent 5 (CPU wheels below)
 # Keep torchvision on the same PyTorch release (torch 2.6.x -> torchvision 0.21.x).
 # torchvision 0.28 with torch 2.6 breaks transformers: operator torchvision::nms does not exist.
@@ -49,7 +55,7 @@ FlagEmbedding>=1.2.10
 sentence-transformers>=3.0.0
 numpy>=1.26.0
 chromadb>=1.0.0
-# Docling layout model needs rt_detr_v2 (transformers 4.51+). Stay below 5.x for FlagEmbedding / parler-tts.
+# Docling layout model needs rt_detr_v2 (transformers 4.51+). Stay below 5.x for FlagEmbedding.
 transformers>=4.51.0,<5.0.0
 
 # Authentication
