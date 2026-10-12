@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from models.candidate import Candidate, CandidateStatus
 from models.department import Department
@@ -18,7 +19,7 @@ from models.user import User, UserRole
 from repositories.candidate_repository import CandidateRepository
 from repositories.department_repository import DepartmentRepository
 from repositories.job_posting_repository import JobPostingRepository
-from schemas.auth import CreateUserRequest, UpdateUserRequest, UserResponse
+from schemas.auth import CreateUserRequest, UpdateUserRequest
 from schemas.department import DepartmentCreate, DepartmentUpdate, DepartmentResponse
 from schemas.jobs import JobPostingCreate, JobPostingUpdate, JobPostingResponse
 from services.auth_service import AuthService
@@ -26,7 +27,21 @@ from services.superadmin_database_service import map_db_error
 
 
 def _user_payload(user: User) -> dict[str, Any]:
-    return UserResponse.model_validate(user).model_dump(mode="json")
+    # Avoid lazy-loading company in async sessions (MissingGreenlet → empty/stale UI).
+    role = user.role.value if hasattr(user.role, "value") else str(user.role or "")
+    return {
+        "id": user.id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "job_title": user.job_title,
+        "phone": user.phone,
+        "role": role,
+        "is_active": bool(user.is_active),
+        "company_id": user.company_id,
+        "company": None,
+        "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
 
 
 def _job_payload(job: JobPosting, applicants: int = 0) -> dict[str, Any]:
@@ -65,7 +80,7 @@ class SuperAdminDataService:
         ]
 
     async def list_users(self, *, search: str, limit: int, offset: int) -> dict[str, Any]:
-        query = select(User)
+        query = select(User).options(selectinload(User.company))
         if search:
             like = f"%{search.strip()}%"
             query = query.where(or_(User.email.ilike(like), User.full_name.ilike(like)))

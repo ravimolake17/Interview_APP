@@ -37,11 +37,7 @@ from services.agent5_bootstrap_service import bootstrap_agent5_session, snapshot
 from services.audit_service import AuditService
 from services.blueprint_service import BlueprintService
 from services.interview_room_service import in_app_room_url
-from services.join_token_service import (
-    JoinTokenService,
-    candidate_join_window,
-    format_join_window_time,
-)
+from services.join_token_service import JoinTokenService
 from services.application_settings_service import ApplicationSettingsService
 from services.screening_integration_service import can_resend_invite
 from services.slot_service import SlotService, company_now
@@ -411,8 +407,27 @@ async def join_interview(
 
     if interview.status != InterviewStatus.SCHEDULED:
         raise _join_http_error(409, "This interview is no longer active.", company)
+
+    from services.interview_room_service import runtime_from_snapshot
+    from services.join_token_service import (
+        assert_candidate_entry_allowed,
+        parse_runtime_datetime,
+    )
+
+    runtime = runtime_from_snapshot(candidate) if participant_role == "candidate" else {}
+    already_started = bool(
+        participant_role == "candidate"
+        and (
+            runtime.get("first_room_join_at")
+            or runtime.get("room_visit_open")
+        )
+    )
+
     expires_at = interview.join_token_expires_at
-    if expires_at is not None:
+    # First-time joiners must use the link before scheduled end. Candidates who
+    # already started once may rejoin until first_start + duration even if the
+    # token's scheduled-end expiry has passed.
+    if expires_at is not None and not already_started:
         expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
         if trusted_utc_now() > expiry:
             raise _join_http_error(410, "This interview link has expired.", company)
@@ -420,30 +435,27 @@ async def join_interview(
     if participant_role == "candidate":
         settings_service = ApplicationSettingsService(db)
         company_settings = await settings_service.get_company(candidate.company_id)
-        availability = await settings_service.get_interview_availability(candidate.company_id)
         tz_name = getattr(company_settings, "timezone", None)
-        opens_at, _starts_at, closes_at = candidate_join_window(
-            interview.scheduled_date,
-            interview.scheduled_time,
-            duration_minutes=availability.slot_minutes,
-            tz_name=tz_name,
+        duration_minutes = await BlueprintService(db).planned_duration_minutes(
+            candidate.candidate_id
         )
-        now = company_now(tz_name)
-        if now < opens_at:
-            raise _join_http_error(
-                403,
-                (
-                    f"The interview room opens at {format_join_window_time(opens_at)}. "
-                    "Please join then to complete identity verification and start your interview."
+        try:
+            assert_candidate_entry_allowed(
+                scheduled_date=interview.scheduled_date,
+                scheduled_time=interview.scheduled_time,
+                duration_minutes=duration_minutes,
+                tz_name=tz_name,
+                room_visit_open=bool(runtime.get("room_visit_open")),
+                first_started_at=parse_runtime_datetime(
+                    runtime.get("first_room_join_at"),
+                    tz_name=tz_name,
                 ),
-                company,
             )
-        if now > closes_at:
-            raise _join_http_error(
-                410,
-                "This interview session is no longer available. Please contact HR if you need assistance.",
-                company,
-            )
+        except HTTPException as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                detail = str(detail.get("message") or detail)
+            raise _join_http_error(exc.status_code, str(detail), company) from exc
 
     snapshot = dict(candidate.evaluation_snapshot or {})
     agent5_meta = dict(snapshot.get("agent5") or {})

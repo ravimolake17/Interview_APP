@@ -35,14 +35,13 @@ def require_candidate_session(
     if str(payload.get("sub", "")) != session.candidate_id:
         raise HTTPException(status_code=401, detail="candidate token is not bound to this session")
     if str(payload.get("participant_role") or "candidate").lower() != "hr":
-        live = (
-            str(session.status or "") in {"active", "terminating"}
-            and getattr(session, "started_at", None) is not None
-        )
-        if not live:
-            from services.join_token_service import enforce_rr_candidate_join_window
+        # Always enforce: continuous open visit OK; rejoin only until first_start+duration.
+        from services.join_token_service import enforce_rr_candidate_join_window
 
-            enforce_rr_candidate_join_window(str(payload.get("rr_candidate_id") or ""))
+        enforce_rr_candidate_join_window(
+            str(payload.get("rr_candidate_id") or ""),
+            session_started_at=getattr(session, "started_at", None),
+        )
     return session
 
 

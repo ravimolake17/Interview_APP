@@ -35,7 +35,15 @@ def candidate_join_window(
     duration_minutes: int | None = None,
     tz_name: str | None = None,
 ) -> tuple[datetime, datetime, datetime]:
-    """Return (opens_at, starts_at, closes_at) in company local time."""
+    """Return (opens_at, starts_at, closes_at) in company local time.
+
+    First entry is allowed only while opens_at <= now < closes_at
+    (e.g. 10:00 start, 30 min → join until 10:30).
+
+    After the candidate has started once, rejoin uses
+    ``assert_candidate_entry_allowed`` (first_start + duration), and an
+    open room visit is never cut off mid-interview.
+    """
     duration = duration_minutes or InterviewAvailabilitySettings().slot_minutes
     start = interview_start_local(scheduled_date, scheduled_time, tz_name)
     opens_at = start - timedelta(minutes=CANDIDATE_JOIN_LEAD_MINUTES)
@@ -48,30 +56,145 @@ def format_join_window_time(value: datetime) -> str:
     return f"{clock} on {value.strftime('%d %B %Y')}"
 
 
-def enforce_rr_candidate_join_window(candidate_id: str) -> None:
-    """Block Agent 5 candidate APIs until the company-local join window opens.
+def join_window_closed_message(closes_at: datetime) -> str:
+    return (
+        f"This interview join window closed at {format_join_window_time(closes_at)}. "
+        "You must join before the scheduled end time. Please contact HR if you need assistance."
+    )
 
-    Uses the trusted server clock so a laptop date/time change cannot open the room early.
+
+def rejoin_closes_at(first_started_at: datetime, duration_minutes: int) -> datetime:
+    """Deadline for leaving and coming back: first start + assigned duration."""
+    return first_started_at + timedelta(minutes=max(int(duration_minutes or 30), 5))
+
+
+def rejoin_closed_message(closes_at: datetime) -> str:
+    return (
+        f"Your interview time ended at {format_join_window_time(closes_at)}. "
+        "You can no longer rejoin this session. Please contact HR if you need assistance."
+    )
+
+
+def parse_runtime_datetime(value: object, *, tz_name: str | None = None) -> datetime | None:
+    """Parse ISO timestamps stored on interview_runtime (UTC or offset-aware)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_company_tz(tz_name))
+
+
+def assert_candidate_entry_allowed(
+    *,
+    scheduled_date: date,
+    scheduled_time: time,
+    duration_minutes: int | None,
+    tz_name: str | None,
+    now: datetime | None = None,
+    room_visit_open: bool = False,
+    first_started_at: datetime | None = None,
+) -> None:
+    """Gate first join and rejoin without ending a continuous live session.
+
+    Rules:
+    - Open room visit (still in the meeting): always allow — interview may overrun.
+    - Already started once, then left: allow only until first_start + duration.
+    - Never started: allow only in the scheduled join window.
     """
     from fastapi import HTTPException
 
-    cid = (candidate_id or "").strip()
-    if not cid:
-        raise HTTPException(
-            status_code=403,
-            detail="This session is not linked to a scheduled interview.",
-        )
-
-    from sqlalchemy import text
-
-    from agents.proctoring_agent.db import SessionLocal
     from services.slot_service import company_now
 
-    with SessionLocal() as db:
-        row = db.execute(
-            text(
-                """
-                SELECT i.scheduled_date, i.scheduled_time, i.status::text,
+    try:
+        duration = int(duration_minutes or 30)
+    except (TypeError, ValueError):
+        duration = 30
+    duration = max(duration, 5)
+
+    clock = now or company_now(tz_name)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=_company_tz(tz_name))
+
+    if room_visit_open:
+        return
+
+    if first_started_at is not None:
+        started = first_started_at
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        started = started.astimezone(_company_tz(tz_name))
+        deadline = rejoin_closes_at(started, duration)
+        if clock >= deadline:
+            raise HTTPException(status_code=410, detail=rejoin_closed_message(deadline))
+        return
+
+    opens_at, _starts_at, closes_at = candidate_join_window(
+        scheduled_date,
+        scheduled_time,
+        duration_minutes=duration,
+        tz_name=tz_name,
+    )
+    if clock < opens_at:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"The interview room opens at {format_join_window_time(opens_at)}. "
+                "Please join then to complete identity verification and start your interview."
+            ),
+        )
+    if clock >= closes_at:
+        raise HTTPException(
+            status_code=410,
+            detail=join_window_closed_message(closes_at),
+        )
+
+
+def _duration_timezone_sql() -> str:
+    return """
+                       COALESCE(
+                         (
+                           SELECT NULLIF(
+                             (bp.blueprint_json->'time_allocation'->>'total_duration_minutes')::int,
+                             0
+                           )
+                           FROM public.interview_blueprint bp
+                           WHERE bp.candidate_id = i.candidate_id
+                           ORDER BY bp.created_at DESC
+                           LIMIT 1
+                         ),
+                         (
+                           SELECT NULLIF(qs.total_duration_minutes, 0)
+                           FROM public.interview_question_sets qs
+                           WHERE qs.candidate_id = i.candidate_id
+                           ORDER BY qs.created_at DESC
+                           LIMIT 1
+                         ),
+                         (
+                           SELECT NULLIF((s.data->>'slot_minutes')::int, 0)
+                           FROM public.application_settings s
+                           WHERE s.scope_key = 'company:' || c.company_id::text
+                             AND s.namespace = 'interview_availability'
+                           LIMIT 1
+                         ),
+                         (
+                           SELECT NULLIF((s.data->>'slot_minutes')::int, 0)
+                           FROM public.application_settings s
+                           WHERE s.scope_key = 'global'
+                             AND s.namespace = 'interview_availability'
+                           LIMIT 1
+                         ),
+                         30
+                       ) AS duration_minutes,
                        COALESCE(
                          (
                            SELECT s.data->>'timezone'
@@ -88,7 +211,40 @@ def enforce_rr_candidate_join_window(candidate_id: str) -> None:
                            LIMIT 1
                          ),
                          'Asia/Kolkata'
-                       ) AS timezone
+                       ) AS timezone,
+                       c.evaluation_snapshot
+    """
+
+
+def enforce_rr_candidate_join_window(
+    candidate_id: str,
+    *,
+    session_started_at: datetime | None = None,
+) -> None:
+    """Block Agent 5 candidate APIs outside first-join / rejoin rules.
+
+    Continuous open visits are not time-killed. Rejoin after leave is limited to
+    first_start + assigned duration (hours/days later is blocked).
+    """
+    from fastapi import HTTPException
+
+    cid = (candidate_id or "").strip()
+    if not cid:
+        raise HTTPException(
+            status_code=403,
+            detail="This session is not linked to a scheduled interview.",
+        )
+
+    from sqlalchemy import text
+
+    from agents.proctoring_agent.db import SessionLocal
+
+    with SessionLocal() as db:
+        row = db.execute(
+            text(
+                f"""
+                SELECT i.scheduled_date, i.scheduled_time, i.status::text,
+{_duration_timezone_sql()}
                 FROM public.interview i
                 JOIN public.candidate c ON c.candidate_id = i.candidate_id
                 WHERE i.candidate_id = :cid
@@ -105,7 +261,7 @@ def enforce_rr_candidate_join_window(candidate_id: str) -> None:
             detail="No scheduled interview was found for this candidate.",
         )
 
-    scheduled_date, scheduled_time, status, tz_name = row
+    scheduled_date, scheduled_time, status, duration_minutes, tz_name, snapshot = row
     status_text = str(status or "").upper()
     if "SCHEDULED" not in status_text:
         raise HTTPException(
@@ -113,28 +269,25 @@ def enforce_rr_candidate_join_window(candidate_id: str) -> None:
             detail="This interview is no longer active.",
         )
 
-    now = company_now(tz_name)
-    opens_at, _starts_at, closes_at = candidate_join_window(
-        scheduled_date,
-        scheduled_time,
+    snap = dict(snapshot or {}) if isinstance(snapshot, dict) else {}
+    agent5 = dict(snap.get("agent5") or {})
+    runtime = dict(agent5.get("interview_runtime") or {})
+    room_visit_open = bool(runtime.get("room_visit_open"))
+    first_started = parse_runtime_datetime(
+        runtime.get("first_room_join_at"),
         tz_name=tz_name,
     )
-    if now < opens_at:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"The interview room opens at {format_join_window_time(opens_at)}. "
-                "Please join then to complete identity verification and start your interview."
-            ),
-        )
-    if now > closes_at:
-        raise HTTPException(
-            status_code=410,
-            detail=(
-                "This interview session is no longer available. "
-                "Please contact HR if you need assistance."
-            ),
-        )
+    if first_started is None and session_started_at is not None:
+        first_started = parse_runtime_datetime(session_started_at, tz_name=tz_name)
+
+    assert_candidate_entry_allowed(
+        scheduled_date=scheduled_date,
+        scheduled_time=scheduled_time,
+        duration_minutes=duration_minutes,
+        tz_name=tz_name,
+        room_visit_open=room_visit_open,
+        first_started_at=first_started,
+    )
 
 
 class JoinTokenService:
@@ -163,4 +316,7 @@ class JoinTokenService:
             scheduled_time,
             duration_minutes=duration,
         )
-        return closes_at.astimezone(timezone.utc) + timedelta(hours=24)
+        # Token dies when the first-join window closes (not 24h later).
+        # Rejoin after first start uses first_room_join_at + duration and may
+        # ignore this expiry when the candidate already started once.
+        return closes_at.astimezone(timezone.utc)

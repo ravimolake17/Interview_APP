@@ -58,7 +58,7 @@ export default function DataManagement() {
     const params = { limit: PAGE_SIZE, offset: nextOffset, search: nextSearch };
     if (nextEntity === 'candidates' && nextStatus) params.status = nextStatus;
     const { data } = await getDataRecords(nextEntity, params);
-    setRecords(data.records || []);
+    setRecords(Array.isArray(data.records) ? data.records : []);
     setTotal(data.total || 0);
     if (nextEntity === 'company' && data.records?.[0]) setCompanyForm(data.records[0]);
   }, []);
@@ -90,6 +90,9 @@ export default function DataManagement() {
     setSearch('');
     setStatus('');
     setEditing(null);
+    setCandidateForm(null);
+    setRecords([]);
+    setTotal(0);
     setError(null);
     setMessage(null);
   };

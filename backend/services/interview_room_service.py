@@ -128,6 +128,31 @@ async def require_scheduled_interview(db: AsyncSession, candidate_id: str) -> tu
         expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
         if _utcnow() > expiry:
             raise HTTPException(status_code=410, detail="This interview link has expired.")
+
+    # First join by scheduled end; rejoin by first_start + duration; open visit OK.
+    runtime = runtime_from_snapshot(candidate)
+    from services.blueprint_service import BlueprintService
+    from services.join_token_service import (
+        assert_candidate_entry_allowed,
+        parse_runtime_datetime,
+    )
+    from services.application_settings_service import ApplicationSettingsService
+
+    company_settings = await ApplicationSettingsService(db).get_company(candidate.company_id)
+    tz_name = getattr(company_settings, "timezone", None)
+    duration = await BlueprintService(db).planned_duration_minutes(candidate_id)
+    assert_candidate_entry_allowed(
+        scheduled_date=interview.scheduled_date,
+        scheduled_time=interview.scheduled_time,
+        duration_minutes=duration,
+        tz_name=tz_name,
+        room_visit_open=bool(runtime.get("room_visit_open")),
+        first_started_at=parse_runtime_datetime(
+            runtime.get("first_room_join_at"),
+            tz_name=tz_name,
+        ),
+    )
+
     return candidate, interview
 
 
@@ -198,14 +223,14 @@ def register_room_join(candidate: Candidate) -> dict[str, Any]:
         return runtime
     if room_join_count(runtime) >= MAX_ROOM_JOINS:
         raise HTTPException(status_code=403, detail=ROOM_REJOIN_BLOCKED)
-    return persist_runtime(
-        candidate,
-        {
-            "room_join_count": room_join_count(runtime) + 1,
-            "room_visit_open": True,
-            "left_by": None,
-        },
-    )
+    payload: dict[str, Any] = {
+        "room_join_count": room_join_count(runtime) + 1,
+        "room_visit_open": True,
+        "left_by": None,
+    }
+    if not runtime.get("first_room_join_at"):
+        payload["first_room_join_at"] = _utcnow().isoformat()
+    return persist_runtime(candidate, payload)
 
 
 def register_room_join_sync(rr_candidate_id: str) -> dict[str, Any]:
@@ -234,14 +259,15 @@ def register_room_join_sync(rr_candidate_id: str) -> dict[str, Any]:
             return runtime
         if room_join_count(runtime) >= MAX_ROOM_JOINS:
             raise HTTPException(status_code=403, detail=ROOM_REJOIN_BLOCKED)
-        runtime.update(
-            {
-                "room_join_count": room_join_count(runtime) + 1,
-                "room_visit_open": True,
-                "left_by": None,
-                "updated_at": _utcnow().isoformat(),
-            }
-        )
+        patch: dict[str, Any] = {
+            "room_join_count": room_join_count(runtime) + 1,
+            "room_visit_open": True,
+            "left_by": None,
+            "updated_at": _utcnow().isoformat(),
+        }
+        if not runtime.get("first_room_join_at"):
+            patch["first_room_join_at"] = _utcnow().isoformat()
+        runtime.update(patch)
         agent5[RUNTIME_KEY] = runtime
         snapshot["agent5"] = agent5
         db.execute(
