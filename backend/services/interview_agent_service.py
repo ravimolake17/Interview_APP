@@ -38,7 +38,7 @@ from repositories.candidate_repository import CandidateRepository
 from repositories.interview_question_set_repository import InterviewQuestionSetRepository
 from repositories.interview_repository import InterviewRepository
 from services.application_settings_service import ApplicationSettingsService
-from services.interview_room_service import plan_is_locked
+from services.interview_room_service import live_interview_started
 from services.interview_tts_cache_service import InterviewTTSCacheService
 from services.slot_service import company_now
 
@@ -255,7 +255,7 @@ class InterviewAgentService:
             session_status = None
             if include_session:
                 session_status = await self._langgraph_status(candidate_id)
-            live_started = plan_is_locked(person, session_status)
+            live_started = live_interview_started(person, session_status)
         policy = question_edit_policy(
             now=now,
             start_at=start_at,

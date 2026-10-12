@@ -21,23 +21,19 @@ from repositories.candidate_repository import CandidateRepository
 from services.application_settings_service import ApplicationSettingsService
 from services.audit_service import AuditService
 from services.blueprint_service import BlueprintService
-from services.interview_room_service import plan_is_locked
-
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/interview", tags=["Interview Blueprint (Agent 3)"])
 
 
 async def _plan_locked_for_candidate(db: AsyncSession, candidate_id: str) -> bool:
-    candidate = await CandidateRepository(db).get_by_candidate_id(candidate_id)
-    status = None
-    try:
-        from agents.interview_agent.graph import InterviewLangGraphAgent
+    """Same window as question edits: open until 10 minutes before scheduled start."""
+    from services.interview_agent_service import InterviewAgentService
 
-        state = await InterviewLangGraphAgent(db).get_session_state(candidate_id)
-        status = str((state or {}).get("Status") or "")
-    except Exception:
-        status = None
-    return plan_is_locked(candidate, status)
+    policy = await InterviewAgentService(db).get_question_edit_policy(
+        candidate_id,
+        include_session=True,
+    )
+    return not bool(policy.get("allowed", True))
 
 
 class BlueprintStoredResponse(BaseModel):
@@ -114,7 +110,10 @@ async def generate_blueprint_for_candidate(
         if await _plan_locked_for_candidate(db, candidate_id):
             raise HTTPException(
                 status_code=409,
-                detail="Interview already started. Level and timing can only be edited before the interview begins.",
+                detail=(
+                    "Level and timing can only be edited until 10 minutes before "
+                    "the scheduled interview start."
+                ),
             )
     service = BlueprintService(db)
     try:

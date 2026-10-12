@@ -38,6 +38,23 @@ function parseTimeToMinutes(timeStr) {
   return h * 60 + m;
 }
 
+/** Staff open the HR room path — never show the candidate join URL. */
+function toInterviewerJoinLink(joinLink) {
+  if (!joinLink) return null;
+  try {
+    const url = new URL(joinLink, window.location.origin);
+    if (/\/(interview|join)\/hr\//.test(url.pathname)) return url.toString();
+    url.pathname = url.pathname
+      .replace(/\/interview\//, '/interview/hr/')
+      .replace(/\/join\//, '/join/hr/');
+    return url.toString();
+  } catch {
+    return String(joinLink)
+      .replace('/interview/', '/interview/hr/')
+      .replace('/join/', '/join/hr/');
+  }
+}
+
 function hourBounds(availability) {
   const start = Number(String(availability?.start_time || '09:00').slice(0, 2));
   const [endHour, endMinute] = String(availability?.end_time || '19:00').split(':').map(Number);
@@ -142,14 +159,14 @@ function CandidateProfileDrawer({ detail, onClose }) {
                   <p className="text-sm font-semibold text-gray-800">{formatTimeLabel(detail.scheduled_time)}</p>
                 </div>
               </div>
-              {detail.meeting_link && (
+              {toInterviewerJoinLink(detail.meeting_link) && (
                 <a
-                  href={detail.meeting_link}
+                  href={toInterviewerJoinLink(detail.meeting_link)}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex text-sm text-hr-700 hover:text-hr-800 underline underline-offset-2"
                 >
-                  Open interview room
+                  Open interview room (HR / Admin)
                 </a>
               )}
               <div className="flex flex-wrap gap-2">

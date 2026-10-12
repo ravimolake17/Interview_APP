@@ -140,24 +140,41 @@ def runtime_from_snapshot(candidate: Candidate) -> dict[str, Any]:
     return runtime
 
 
-PLAN_LOCK_RUNTIME = {AI_INTERVIEW_ACTIVE, HR_INTERVENTION, COMPLETED, ENDED}
-PLAN_LOCK_SESSION = {
+# HR_INTERVENTION alone must NOT lock the plan — HR may open the room early to
+# preview. Edits stay open until 10 minutes before the scheduled start (see
+# question_edit_policy / blueprint route).
+LIVE_INTERVIEW_RUNTIME = {AI_INTERVIEW_ACTIVE, AI_PAUSED, COMPLETED, ENDED}
+LIVE_INTERVIEW_SESSION = {
     "IN_PROGRESS",
     "AWAITING_ANSWER",
     "TURN_COMPLETE",
     "CANDIDATE_QNA",
     "COMPLETED",
 }
+# Backward-compatible aliases used by older imports/tests.
+PLAN_LOCK_RUNTIME = LIVE_INTERVIEW_RUNTIME
+PLAN_LOCK_SESSION = LIVE_INTERVIEW_SESSION
+
+
+def live_interview_started(
+    candidate: Candidate | None, langgraph_status: str | None = None
+) -> bool:
+    """True when the AI interview itself is underway or finished (not HR preview)."""
+    if candidate is not None:
+        runtime = runtime_from_snapshot(candidate)
+        if str(runtime.get("state") or "") in LIVE_INTERVIEW_RUNTIME:
+            return True
+    status = str(langgraph_status or "").upper()
+    return status in LIVE_INTERVIEW_SESSION
 
 
 def plan_is_locked(candidate: Candidate | None, langgraph_status: str | None = None) -> bool:
-    """True once the live interview has started — Agent 3 edits no longer apply."""
-    if candidate is not None:
-        runtime = runtime_from_snapshot(candidate)
-        if str(runtime.get("state") or "") in PLAN_LOCK_RUNTIME:
-            return True
-    status = str(langgraph_status or "").upper()
-    return status in PLAN_LOCK_SESSION
+    """True once the live AI interview has started.
+
+    Schedule-aware locking (until 10 minutes before start) is applied by
+    InterviewAgentService.get_question_edit_policy / blueprint routes.
+    """
+    return live_interview_started(candidate, langgraph_status)
 
 
 def room_join_count(runtime: dict[str, Any] | None) -> int:

@@ -131,6 +131,12 @@ def test_question_edits_allowed_until_ten_minutes_before_start():
         start_at=start,
         interview_status="COMPLETED",
     )
+    hr_preview = question_edit_policy(
+        now=datetime(2026, 9, 17, 12, 0, tzinfo=tz),
+        start_at=start,
+        interview_status="SCHEDULED",
+        live_started=False,
+    )
     assert open_window["allowed"] is True
     assert cutoff["allowed"] is False
     assert "10 minutes" in str(cutoff["reason"])
@@ -138,3 +144,21 @@ def test_question_edits_allowed_until_ten_minutes_before_start():
     assert "started" in str(started["reason"]).lower()
     assert done["allowed"] is False
     assert "completed" in str(done["reason"]).lower()
+    assert hr_preview["allowed"] is True
+
+
+def test_hr_intervention_runtime_does_not_count_as_live_start():
+    from types import SimpleNamespace
+
+    from services.interview_room_service import live_interview_started, plan_is_locked
+
+    preview = SimpleNamespace(
+        evaluation_snapshot={"agent5": {"interview_runtime": {"state": "HR_INTERVENTION"}}}
+    )
+    live = SimpleNamespace(
+        evaluation_snapshot={"agent5": {"interview_runtime": {"state": "AI_INTERVIEW_ACTIVE"}}}
+    )
+    assert live_interview_started(preview) is False
+    assert plan_is_locked(preview) is False
+    assert live_interview_started(live) is True
+    assert plan_is_locked(live) is True

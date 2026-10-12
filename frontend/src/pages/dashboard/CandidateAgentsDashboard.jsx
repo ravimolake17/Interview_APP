@@ -10,7 +10,6 @@ import {
   ExternalLink,
   ClipboardCheck,
   FileText,
-  Link2,
   Loader2,
   Mail,
   Mic,
@@ -771,14 +770,20 @@ export default function CandidateAgentsDashboard() {
   };
 
   const liveSessionStatuses = ['IN_PROGRESS', 'AWAITING_ANSWER', 'TURN_COMPLETE', 'CANDIDATE_QNA', 'COMPLETED'];
+  // HR_INTERVENTION alone must not lock — HR may open the room early. Backend
+  // plan_locked / question_edits use scheduled start minus 10 minutes.
   const planLocked = Boolean(
     blueprint?.plan_locked
     || liveSessionStatuses.includes(String(session?.status || '').toUpperCase())
-    || ['AI_INTERVIEW_ACTIVE', 'HR_INTERVENTION', 'COMPLETED', 'ENDED'].includes(String(roomRuntime?.state || ''))
+    || ['AI_INTERVIEW_ACTIVE', 'AI_PAUSED', 'COMPLETED', 'ENDED'].includes(String(roomRuntime?.state || ''))
   );
   const questionsLocked = agent4?.question_edits?.allowed === false || planLocked;
   const questionsLockReason = agent4?.question_edits?.reason
     || 'Questions can be changed only until 10 minutes before the interview.';
+  const planLockReason = planLocked
+    ? (agent4?.question_edits?.reason
+      || 'Locked within 10 minutes of the scheduled start (or after the interview begins). HR and Admin can edit until then.')
+    : 'HR and Admin can change level or duration until 10 minutes before the scheduled start.';
 
   const openAddQuestion = (insertAt) => {
     if (questionsLocked) {
@@ -1376,26 +1381,16 @@ export default function CandidateAgentsDashboard() {
             <div className="space-y-4">
               <MetaRow icon={CalendarDays} label="Date" value={formatDateLabel(candidate.scheduledDate)} />
               <MetaRow icon={Clock} label="Time" value={formatTimeLabel(candidate.scheduledTime)} />
-              {candidate.joinLink && !agent5Closed ? (
-                <>
-                  <MetaRow
-                    icon={Link2}
-                    label="Candidate interview URL"
-                    value={candidate.joinLink}
-                    href={candidate.joinLink}
-                  />
-                  {interviewerJoinLink ? (
-                    <MetaRow
-                      icon={Video}
-                      label="HR / Admin join link (skip checks → room)"
-                      value={interviewerJoinLink}
-                      href={interviewerJoinLink}
-                    />
-                  ) : null}
-                </>
+              {interviewerJoinLink && !agent5Closed ? (
+                <MetaRow
+                  icon={Video}
+                  label="HR / Admin join link (skip checks → room)"
+                  value={interviewerJoinLink}
+                  href={interviewerJoinLink}
+                />
               ) : agent5Closed ? (
                 <p className="text-sm text-muted">
-                  The interview session is {agent5Status.label.toLowerCase()}. The candidate join link is no longer active.
+                  The interview session is {agent5Status.label.toLowerCase()}. Join links are no longer active.
                 </p>
               ) : null}
             </div>
@@ -1437,9 +1432,7 @@ export default function CandidateAgentsDashboard() {
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-col">Adjust plan</p>
                     <p className="text-[11px] text-muted">
-                      {planLocked
-                        ? 'Locked after the interview starts. HR and Admin can edit only before start.'
-                        : 'HR and Admin can change level or duration for this interview before it starts'}
+                      {planLockReason}
                     </p>
                   </div>
                 </div>
@@ -2124,25 +2117,15 @@ export default function CandidateAgentsDashboard() {
             ) : (
               <div className="space-y-4">
                 <p className="text-sm text-muted">
-                  Use the candidate link for full device + photo + voice verification. Use the HR / Admin join link to open the interview room directly (checks skipped). Both HR and Admin portal users can use that link.
+                  Use the HR / Admin join link to open the interview room directly (checks skipped). The candidate receives their join link by email only — it is not shown here.
                 </p>
-                {candidate?.joinLink && !agent5Closed ? (
-                  <>
-                    <MetaRow
-                      icon={Link2}
-                      label="Candidate join link"
-                      value={candidate.joinLink}
-                      href={candidate.joinLink}
-                    />
-                    {interviewerJoinLink ? (
-                      <MetaRow
-                        icon={Video}
-                        label="HR / Admin join link"
-                        value={interviewerJoinLink}
-                        href={interviewerJoinLink}
-                      />
-                    ) : null}
-                  </>
+                {interviewerJoinLink && !agent5Closed ? (
+                  <MetaRow
+                    icon={Video}
+                    label="HR / Admin join link"
+                    value={interviewerJoinLink}
+                    href={interviewerJoinLink}
+                  />
                 ) : agent5Closed ? (
                   <p className="text-sm text-muted">
                     This session is {agent5Status.label.toLowerCase()} and cannot be reopened from the join link.
