@@ -111,6 +111,42 @@ class AIModelSettings(BaseModel):
         return str(value or "").strip()
 
 
+class CatalogModelTestRequest(BaseModel):
+    kind: Literal["chat", "stt", "tts"]
+    catalog_id: str = Field(min_length=1, max_length=160)
+    prompt: str = Field(default="", max_length=2000)
+
+    @field_validator("catalog_id", "prompt")
+    @classmethod
+    def strip_test_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class TtsVoicePreviewRequest(BaseModel):
+    provider: Literal["azure", "edge"] = "azure"
+    model_id: str = Field(min_length=1, max_length=120)
+    voice: Literal["female", "male"] = "female"
+    prompt: str = Field(default="", max_length=500)
+
+    @field_validator("model_id", "prompt")
+    @classmethod
+    def strip_preview_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class CatalogModelTestResponse(BaseModel):
+    ok: bool
+    kind: str
+    catalog_id: str
+    name: str
+    provider: str
+    model_id: str
+    text: str = ""
+    audio_base64: str | None = None
+    audio_content_type: str | None = None
+    message: str = ""
+
+
 class CalendarHoliday(BaseModel):
     date: date
     name: str = Field(default="Holiday", min_length=1, max_length=120)

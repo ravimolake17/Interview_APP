@@ -170,6 +170,29 @@ app.add_middleware(
 # Trust X-Forwarded-* from Azure Application Gateway / nginx.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 
+
+@app.middleware("http")
+async def refresh_ai_catalog_middleware(request, call_next):
+    """Keep Chat/STT/TTS catalog hot after SuperAdmin changes (no restart)."""
+    path = request.url.path or ""
+    if (
+        path.startswith("/api/")
+        or path.startswith("/screening/")
+        or path.startswith("/extract")
+        or path.startswith("/jd")
+        or path.startswith("/matching")
+    ):
+        try:
+            from agents.shared.model_catalog import catalog_needs_refresh
+
+            if catalog_needs_refresh():
+                async with AsyncSessionLocal() as db:
+                    await ApplicationSettingsService(db).refresh_ai_runtime_if_stale()
+        except Exception:
+            logger.debug("AI catalog refresh skipped", exc_info=True)
+    return await call_next(request)
+
+
 # Agent 1 — Resume Screening
 app.include_router(extract_router)
 app.include_router(jd_router)

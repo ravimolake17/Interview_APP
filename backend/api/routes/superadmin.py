@@ -1,6 +1,8 @@
 """SuperAdmin control plane: Database Console, LLM, and system health."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+import asyncio
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,12 +17,15 @@ from repositories.company_repository import CompanyRepository
 from repositories.screening_job_repository import ScreeningJobRepository
 from schemas.settings import (
     AIModelSettings,
+    CatalogModelTestRequest,
+    CatalogModelTestResponse,
     CompanySettings,
     IntegrationStatus,
     IntegrationUpdate,
     ScreeningPolicySettings,
     SmtpAccountSettings,
     SmtpAccountUpdate,
+    TtsVoicePreviewRequest,
 )
 from schemas.superadmin import (
     DatabaseOverview,
@@ -33,6 +38,7 @@ from schemas.superadmin import (
 )
 from services.application_settings_service import ApplicationSettingsService
 from services.audit_service import AuditService
+from services.model_test_service import preview_tts_voice, test_catalog_model, test_catalog_stt
 from services.superadmin_database_service import SuperAdminDatabaseService
 
 router = APIRouter(prefix="/superadmin", tags=["SuperAdmin"])
@@ -118,12 +124,93 @@ async def get_system_overview(
 @router.patch("/ai-model", response_model=AIModelSettings)
 async def update_llm_settings(
     payload: AIModelSettings,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     superadmin: User = Depends(get_current_superadmin),
 ) -> AIModelSettings:
-    result = await ApplicationSettingsService(db).save_ai_model(payload, superadmin.id)
+    service = ApplicationSettingsService(db)
+    before = await service.get_ai_model()
+    result = await service.save_ai_model(payload, superadmin.id)
+    await AuditService(db).log(
+        action="AI_SETTINGS_UPDATED",
+        entity_type="settings",
+        entity_id="ai-model",
+        user=superadmin,
+        request=request,
+        ip_address=get_client_ip(request),
+        old_value=before.model_dump(mode="json"),
+        new_value=result.model_dump(mode="json"),
+        details={
+            "provider": result.provider,
+            "model_id": result.model_id,
+            "temperature": result.temperature,
+            "max_tokens": result.max_tokens,
+            "prompt_style": result.prompt_style,
+        },
+        message=f"{superadmin.full_name} updated AI model settings.",
+        company_id=superadmin.company_id,
+    )
     await db.commit()
     return result
+
+
+@router.post("/ai-model/test", response_model=CatalogModelTestResponse)
+async def test_ai_catalog_model(
+    payload: CatalogModelTestRequest,
+    db: AsyncSession = Depends(get_db),
+    _superadmin: User = Depends(get_current_superadmin),
+) -> CatalogModelTestResponse:
+    await ApplicationSettingsService(db).load_ai_runtime()
+    try:
+        return await asyncio.to_thread(test_catalog_model, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Model test failed.") from exc
+
+
+@router.post("/ai-model/preview-tts", response_model=CatalogModelTestResponse)
+async def preview_ai_tts_voice(
+    payload: TtsVoicePreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _superadmin: User = Depends(get_current_superadmin),
+) -> CatalogModelTestResponse:
+    await ApplicationSettingsService(db).load_ai_runtime()
+    try:
+        return await asyncio.to_thread(
+            preview_tts_voice,
+            provider=payload.provider,
+            model_id=payload.model_id,
+            voice=payload.voice,
+            prompt=payload.prompt,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Voice preview failed.") from exc
+
+
+@router.post("/ai-model/test-stt", response_model=CatalogModelTestResponse)
+async def test_ai_catalog_stt(
+    catalog_id: str = Form(...),
+    audio: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _superadmin: User = Depends(get_current_superadmin),
+) -> CatalogModelTestResponse:
+    await ApplicationSettingsService(db).load_ai_runtime()
+    content = await audio.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Record or choose a short audio clip.")
+    if len(content) > 6 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Audio clip is too large. Keep it under 6 MB.")
+    try:
+        return await asyncio.to_thread(
+            test_catalog_stt, catalog_id, content, audio.filename or "audio.webm"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc) or "Speech-to-text test failed.") from exc
 
 
 @router.patch("/company", response_model=CompanySettings)

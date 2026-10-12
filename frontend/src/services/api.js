@@ -147,6 +147,9 @@ export function attachAuthInterceptors(client) {
     } catch {
       /* ignore */
     }
+    if (typeof FormData !== 'undefined' && config.data instanceof FormData) {
+      delete config.headers['Content-Type'];
+    }
     return config;
   });
 
@@ -395,6 +398,16 @@ export const updateProfileSettings = (payload) => api.patch('/settings/profile',
 export const updateCompanySettings = (payload) => api.patch('/settings/company', payload);
 export const updatePreferenceSettings = (payload) => api.patch('/settings/preferences', payload);
 export const updateAIModelSettings = (payload) => api.patch('/settings/ai-model', payload);
+export const testCatalogModel = (payload) =>
+  api.post('/superadmin/ai-model/test', payload, { timeout: 60000 });
+export const previewTtsVoice = (payload) =>
+  api.post('/superadmin/ai-model/preview-tts', payload, { timeout: 60000 });
+export const testCatalogStt = (catalogId, audioFile) => {
+  const body = new FormData();
+  body.append('catalog_id', catalogId);
+  body.append('audio', audioFile);
+  return api.post('/superadmin/ai-model/test-stt', body, { timeout: 60000 });
+};
 export const updateIntegrationSettings = (payload) => api.patch('/superadmin/integration', payload);
 export const updateCompanySmtp = (companyId, payload) =>
   api.patch(`/superadmin/smtp/${companyId}`, payload);

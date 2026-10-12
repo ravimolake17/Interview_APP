@@ -12,6 +12,14 @@ import re
 from typing import Any
 
 from agents.screening_agent.config import settings
+from agents.shared.model_catalog import (
+    describe_target,
+    get_runtime_catalog,
+    normalize_azure_openai_endpoint,
+    ordered_targets,
+    should_fallback,
+)
+from schemas.settings import AICatalogEntry
 
 logger = logging.getLogger(__name__)
 
@@ -27,18 +35,36 @@ DEPRECATED_GROQ_MODELS = {
 _warned_models: set[str] = set()
 
 
+def _azure_ready(entry: AICatalogEntry | None = None) -> bool:
+    endpoint = str(
+        (entry.endpoint if entry and entry.endpoint else None)
+        or getattr(settings, "AZURE_OPENAI_ENDPOINT", "")
+        or ""
+    ).strip()
+    deployment = str(
+        (entry.model_id if entry else None)
+        or getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")
+        or settings.GROQ_MODEL
+        or ""
+    ).strip()
+    return bool(getattr(settings, "AZURE_OPENAI_API_KEY", None) and endpoint and deployment)
+
+
+def _groq_ready() -> bool:
+    return bool(settings.GROQ_API_KEY)
+
+
 def llama_available() -> bool:
+    targets = ordered_targets("chat")
+    if targets:
+        return any(
+            (_azure_ready(entry) if entry.provider == "azure" else _groq_ready())
+            for entry in targets
+        )
     provider = str(getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
     if provider == "azure":
-        return bool(
-            getattr(settings, "AZURE_OPENAI_API_KEY", None)
-            and getattr(settings, "AZURE_OPENAI_ENDPOINT", "")
-            and (
-                getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")
-                or settings.GROQ_MODEL
-            )
-        )
-    return bool(settings.GROQ_API_KEY)
+        return _azure_ready()
+    return _groq_ready()
 
 
 def resolve_groq_model(model_id: str | None) -> str:
@@ -58,6 +84,9 @@ def resolve_groq_model(model_id: str | None) -> str:
 
 
 def llama_model_id() -> str:
+    targets = ordered_targets("chat")
+    if targets:
+        return targets[0].model_id
     return resolve_groq_model(settings.GROQ_MODEL)
 
 
@@ -76,6 +105,38 @@ def _client():
     )
 
 
+_AZURE_API_VERSION_OK = re.compile(
+    r"^\d{4}-\d{2}-\d{2}(?:-preview)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_gpt5_family(deployment: str) -> bool:
+    name = str(deployment or "").casefold().replace("_", "-")
+    return "gpt-5" in name or name.startswith("o1") or name.startswith("o3") or name.startswith("o4")
+
+
+def _resolve_azure_api_version(
+    *,
+    entry: AICatalogEntry | None,
+    catalog,
+    deployment: str,
+) -> str:
+    shared = str(
+        catalog.azure_openai_api_version
+        or getattr(settings, "AZURE_OPENAI_API_VERSION", "")
+        or "2024-10-21"
+    ).strip() or "2024-10-21"
+    raw = str(entry.api_version if entry and entry.api_version else shared).strip() or shared
+    # Portal "model version" (e.g. 2025-08-07) is often pasted here by mistake.
+    # Prefer a real chat API version for GPT-5 / reasoning deployments.
+    if _is_gpt5_family(deployment) and raw == "2025-08-07":
+        return shared if shared != "2025-08-07" else "2024-12-01-preview"
+    if not _AZURE_API_VERSION_OK.match(raw):
+        return shared
+    return raw
+
+
 def _call_azure_chat(
     system_prompt: str,
     user_prompt: str,
@@ -83,16 +144,26 @@ def _call_azure_chat(
     json_mode: bool,
     temperature: float,
     max_tokens: int,
+    entry: AICatalogEntry | None = None,
 ) -> str:
     import httpx
 
-    endpoint = str(getattr(settings, "AZURE_OPENAI_ENDPOINT", "") or "").rstrip("/")
+    catalog = get_runtime_catalog()
+    endpoint = normalize_azure_openai_endpoint(
+        str(
+            (entry.endpoint if entry and entry.endpoint else None)
+            or catalog.azure_openai_endpoint
+            or getattr(settings, "AZURE_OPENAI_ENDPOINT", "")
+            or ""
+        )
+    )
     deployment = str(
-        getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "") or settings.GROQ_MODEL
+        (entry.model_id if entry else None)
+        or catalog.azure_openai_deployment
+        or getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")
+        or settings.GROQ_MODEL
     ).strip()
-    api_version = str(
-        getattr(settings, "AZURE_OPENAI_API_VERSION", "") or "2024-10-21"
-    ).strip()
+    api_version = _resolve_azure_api_version(entry=entry, catalog=catalog, deployment=deployment)
     api_key = getattr(settings, "AZURE_OPENAI_API_KEY", None)
     if not endpoint or not deployment or not api_key:
         raise RuntimeError(
@@ -100,13 +171,17 @@ def _call_azure_chat(
         )
     url = f"{endpoint}/openai/deployments/{deployment}/chat/completions"
     payload: dict[str, Any] = {
-        "temperature": temperature,
-        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     }
+    # GPT-5 / reasoning deployments reject max_tokens and often only allow default temperature.
+    if _is_gpt5_family(deployment):
+        payload["max_completion_tokens"] = int(max_tokens)
+    else:
+        payload["temperature"] = temperature
+        payload["max_tokens"] = int(max_tokens)
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     response = httpx.post(
@@ -116,7 +191,23 @@ def _call_azure_chat(
         json=payload,
         timeout=getattr(settings, "GROQ_TIMEOUT_SECONDS", 45),
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        detail = ""
+        try:
+            err_body = response.json()
+            err = err_body.get("error") if isinstance(err_body, dict) else None
+            if isinstance(err, dict):
+                detail = str(err.get("message") or err.get("code") or "").strip()
+            elif isinstance(err_body, dict):
+                detail = str(err_body.get("message") or "").strip()
+        except Exception:
+            detail = (response.text or "").strip()
+        detail = detail[:240] or response.reason_phrase or "bad request"
+        raise RuntimeError(
+            f"Azure OpenAI rejected {deployment} ({response.status_code}): {detail}. "
+            "Use the resource endpoint https://….openai.azure.com/ (not the Foundry project URL), "
+            "deployment name exactly as in Azure, and API version like 2024-10-21 — not the model version."
+        )
     body = response.json()
     content = (
         ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
@@ -128,37 +219,24 @@ def _call_azure_chat(
     return str(content).strip()
 
 
-def call_llama(
+def _call_groq_chat(
     system_prompt: str,
     user_prompt: str,
     *,
-    json_mode: bool = True,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
+    json_mode: bool,
+    temperature: float,
+    max_tokens: int,
     model: str | None = None,
 ) -> str:
-    """Call the configured chat model (Groq or Azure OpenAI) and return assistant text."""
-    provider = str(getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
-    temp = settings.GROQ_TEMPERATURE if temperature is None else temperature
-    tokens = settings.GROQ_MAX_TOKENS if max_tokens is None else max_tokens
-    if provider == "azure":
-        return _call_azure_chat(
-            system_prompt,
-            user_prompt,
-            json_mode=json_mode,
-            temperature=temp,
-            max_tokens=tokens,
-        )
-
     client = _client()
     if client is None:
-        raise RuntimeError("Meta Llama is not configured (set GROQ_API_KEY).")
+        raise RuntimeError("Groq is not configured (set GROQ_API_KEY).")
 
     chosen = resolve_groq_model(model or llama_model_id())
     kwargs: dict[str, Any] = {
         "model": chosen,
-        "temperature": settings.GROQ_TEMPERATURE if temperature is None else temperature,
-        "max_tokens": settings.GROQ_MAX_TOKENS if max_tokens is None else max_tokens,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -185,8 +263,102 @@ def call_llama(
             raise
     content = response.choices[0].message.content
     if not content:
-        raise ValueError("Meta Llama returned an empty response.")
+        raise ValueError("Groq returned an empty response.")
     return content.strip()
+
+
+def _invoke_chat_target(
+    entry: AICatalogEntry | None,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    json_mode: bool,
+    temperature: float,
+    max_tokens: int,
+    model: str | None,
+) -> str:
+    provider = (entry.provider if entry else str(getattr(settings, "LLM_PROVIDER", "groq") or "groq")).strip().lower()
+    if provider == "azure":
+        return _call_azure_chat(
+            system_prompt,
+            user_prompt,
+            json_mode=json_mode,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            entry=entry,
+        )
+    return _call_groq_chat(
+        system_prompt,
+        user_prompt,
+        json_mode=json_mode,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model=(entry.model_id if entry else None) or model,
+    )
+
+
+def call_llama_for_entry(
+    entry: AICatalogEntry,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    json_mode: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """Call one catalog chat row only (SuperAdmin test). No fallback."""
+    temp = settings.GROQ_TEMPERATURE if temperature is None else temperature
+    tokens = settings.GROQ_MAX_TOKENS if max_tokens is None else max_tokens
+    return _invoke_chat_target(
+        entry,
+        system_prompt,
+        user_prompt,
+        json_mode=json_mode,
+        temperature=temp,
+        max_tokens=min(int(tokens), 512),
+        model=entry.model_id,
+    )
+
+
+def call_llama(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    json_mode: bool = True,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    model: str | None = None,
+) -> str:
+    """Call primary chat model, then fallback on overload or server errors."""
+    temp = settings.GROQ_TEMPERATURE if temperature is None else temperature
+    tokens = settings.GROQ_MAX_TOKENS if max_tokens is None else max_tokens
+    targets = ordered_targets("chat") or [None]
+    last_error: Exception | None = None
+    for index, entry in enumerate(targets):
+        try:
+            return _invoke_chat_target(
+                entry,
+                system_prompt,
+                user_prompt,
+                json_mode=json_mode,
+                temperature=temp,
+                max_tokens=tokens,
+                model=model,
+            )
+        except Exception as exc:
+            last_error = exc
+            has_next = index < len(targets) - 1
+            if has_next and should_fallback(exc):
+                nxt = targets[index + 1]
+                logger.warning(
+                    "Chat model %s failed (%s); falling back to %s",
+                    describe_target(entry) if entry else "primary",
+                    exc,
+                    describe_target(nxt) if nxt else "fallback",
+                )
+                continue
+            raise
+    raise last_error or RuntimeError("No chat model is configured.")
 
 
 def call_llama_json(

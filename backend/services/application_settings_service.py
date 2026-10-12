@@ -101,6 +101,8 @@ class ApplicationSettingsService:
         return dict(row.data or {}) if row else {}
 
     async def get_ai_model(self) -> AIModelSettings:
+        from agents.shared.model_catalog import hydrate_catalog
+
         row = await self.repo.get("global", "ai_model")
         fallback = {
             "provider": getattr(screening_settings, "LLM_PROVIDER", "groq") or "groq",
@@ -130,14 +132,16 @@ class ApplicationSettingsService:
         data = dict(fallback)
         if row and row.data:
             data.update(row.data)
-        return AIModelSettings.model_validate(data)
+        return hydrate_catalog(AIModelSettings.model_validate(data))
 
     async def save_ai_model(
         self, payload: AIModelSettings, actor_id: int
     ) -> AIModelSettings:
+        from agents.shared.model_catalog import hydrate_catalog, merge_ai_model_payload
+
         current = (await self.get_ai_model()).model_dump()
-        current.update(payload.model_dump(exclude_unset=True))
-        saved = AIModelSettings.model_validate(current)
+        current = merge_ai_model_payload(current, payload)
+        saved = hydrate_catalog(AIModelSettings.model_validate(current))
         await self.repo.upsert(
             "global",
             "ai_model",
@@ -154,7 +158,10 @@ class ApplicationSettingsService:
         secrets: dict | None = None,
     ) -> None:
         from agents.shared.llama_client import resolve_groq_model
+        from agents.shared.model_catalog import hydrate_catalog, set_runtime_catalog
 
+        payload = hydrate_catalog(payload)
+        set_runtime_catalog(payload)
         screening_settings.LLM_PROVIDER = payload.provider
         screening_settings.GROQ_MODEL = (
             resolve_groq_model(payload.model_id)
@@ -417,6 +424,24 @@ class ApplicationSettingsService:
         secrets = await self._secrets()
         self.apply_ai_runtime(await self.get_ai_model(), secrets)
         self.apply_screening_runtime(await self.get_screening_policy())
+
+    async def refresh_ai_runtime_if_stale(self, ttl_seconds: float | None = None) -> bool:
+        """Reload catalog from DB when this worker's in-memory copy is stale.
+
+        SuperAdmin saves already call apply_ai_runtime on the handling worker.
+        Other workers (and long-lived production processes) pick up ON/OFF and
+        preference changes on the next request without a process restart.
+        """
+        from agents.shared.model_catalog import catalog_needs_refresh
+
+        if ttl_seconds is None:
+            stale = catalog_needs_refresh()
+        else:
+            stale = catalog_needs_refresh(ttl_seconds)
+        if not stale:
+            return False
+        await self.load_ai_runtime()
+        return True
 
 
 DEFAULT_APPEARANCE = AppearanceSettings()

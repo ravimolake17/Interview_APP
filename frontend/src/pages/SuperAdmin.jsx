@@ -25,7 +25,6 @@ import {
   getSuperAdminSystem,
   getUsers,
   testIntegrationConnection,
-  updateAIModelSettings,
   updateCompany,
   updateDepartment,
   updateIntegrationSettings,
@@ -38,6 +37,7 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import PasswordInput from '../components/PasswordInput';
 import DatabaseBrowser from './superadmin/DatabaseBrowser';
 import DataManagement from './superadmin/DataManagement';
+import LlmCatalogTab from './superadmin/LlmCatalogTab';
 import { isValidEmail, isValidPassword } from '../utils/validation';
 import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
@@ -80,24 +80,6 @@ const EMPTY_COMPANY = {
   status: 'active',
 };
 
-const GROQ_MODEL_REPLACEMENTS = {
-  'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
-  'llama-3.1-8b-instant': 'openai/gpt-oss-20b',
-};
-
-const AZURE_DEPLOYMENTS = [
-  { value: 'gpt-4o', label: 'gpt-4o' },
-  { value: 'gpt-4o-mini', label: 'gpt-4o mini' },
-];
-const AZURE_DEPLOYMENT_IDS = AZURE_DEPLOYMENTS.map((item) => item.value);
-
-function resolveAzureDeployment(value) {
-  const normalized = String(value || '').trim().toLowerCase().replace(/\s+/g, '-');
-  if (AZURE_DEPLOYMENT_IDS.includes(normalized)) return normalized;
-  if (normalized === 'gpt-4o-mini' || normalized === 'gpt4o-mini' || normalized === 'gpt-4omini') return 'gpt-4o-mini';
-  return 'gpt-4o';
-}
-
 const inputCls = 'input-field';
 const labelCls = 'text-xs font-semibold text-muted uppercase tracking-wider block mb-1.5';
 
@@ -130,21 +112,6 @@ export default function SuperAdmin() {
   const [editingAdminId, setEditingAdminId] = useState(null);
   const [deptForm, setDeptForm] = useState(EMPTY_DEPT);
   const [editingDeptId, setEditingDeptId] = useState(null);
-  const [llmForm, setLlmForm] = useState({
-    provider: 'groq',
-    model_id: 'openai/gpt-oss-120b',
-    temperature: 0,
-    max_tokens: 8192,
-    prompt_style: 'detailed_analysis',
-    azure_openai_endpoint: '',
-    azure_openai_deployment: 'gpt-4o',
-    azure_openai_api_version: '2024-10-21',
-    stt_provider: 'groq',
-    tts_provider: 'edge',
-    azure_speech_region: 'eastus2',
-    azure_speech_stt_endpoint: '',
-    azure_speech_tts_endpoint: '',
-  });
   const [integrationForm, setIntegrationForm] = useState({
     groq_api_key: '',
     azure_openai_api_key: '',
@@ -183,26 +150,6 @@ export default function SuperAdmin() {
       setUsers(usersRes.data.users || []);
       setDepartments(deptRes.data.departments || []);
       setCompanies(companiesRes.data.companies || []);
-      const ai = systemRes.data?.ai_model;
-      if (ai) {
-        const provider = ai.provider || 'groq';
-        const azureDeployment = resolveAzureDeployment(ai.azure_openai_deployment || ai.model_id);
-        setLlmForm({
-          provider,
-          model_id: provider === 'azure' ? azureDeployment : (GROQ_MODEL_REPLACEMENTS[ai.model_id] || ai.model_id),
-          temperature: ai.temperature,
-          max_tokens: ai.max_tokens,
-          prompt_style: ai.prompt_style,
-          azure_openai_endpoint: ai.azure_openai_endpoint || '',
-          azure_openai_deployment: azureDeployment,
-          azure_openai_api_version: ai.azure_openai_api_version || '2024-10-21',
-          stt_provider: ai.stt_provider || 'groq',
-          tts_provider: ai.tts_provider || 'edge',
-          azure_speech_region: ai.azure_speech_region || 'eastus2',
-          azure_speech_stt_endpoint: ai.azure_speech_stt_endpoint || '',
-          azure_speech_tts_endpoint: ai.azure_speech_tts_endpoint || '',
-        });
-      }
       const integration = systemRes.data?.integration;
       if (integration) {
         setIntegrationForm({
@@ -401,35 +348,6 @@ export default function SuperAdmin() {
       await refreshData({ silent: true, force: true });
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not update department.');
-    }
-  };
-
-  const saveLlm = async (event) => {
-    event.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      await updateAIModelSettings({
-        provider: llmForm.provider,
-        model_id: llmForm.provider === 'azure' ? resolveAzureDeployment(llmForm.azure_openai_deployment) : llmForm.model_id,
-        temperature: Number(llmForm.temperature),
-        max_tokens: Number(llmForm.max_tokens),
-        prompt_style: llmForm.prompt_style,
-        azure_openai_endpoint: llmForm.azure_openai_endpoint,
-        azure_openai_deployment: llmForm.provider === 'azure' ? resolveAzureDeployment(llmForm.azure_openai_deployment) : llmForm.azure_openai_deployment,
-        azure_openai_api_version: llmForm.azure_openai_api_version,
-        stt_provider: llmForm.stt_provider,
-        tts_provider: llmForm.tts_provider,
-        azure_speech_region: llmForm.azure_speech_region,
-        azure_speech_stt_endpoint: llmForm.azure_speech_stt_endpoint,
-        azure_speech_tts_endpoint: llmForm.azure_speech_tts_endpoint,
-      });
-      setMessage('LLM, STT, and TTS settings saved.');
-      await loadAll();
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Could not save LLM settings.');
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -866,137 +784,12 @@ export default function SuperAdmin() {
       )}
 
       {tab === 'llm' && (
-        <form onSubmit={saveLlm} className="card p-6 max-w-3xl space-y-4">
-          <p className="text-sm text-muted">
-            Choose Groq or Azure OpenAI for screening, interviews, and evaluation. Speech endpoints are stored here; keys are edited on API &amp; Integration and never shown in full.
-          </p>
-          <div>
-            <label className={labelCls}>Chat provider</label>
-            <select
-              className={inputCls}
-              value={llmForm.provider}
-              onChange={(e) => {
-                const provider = e.target.value;
-                setLlmForm((f) => {
-                  if (provider === 'azure') {
-                    const deployment = resolveAzureDeployment(f.azure_openai_deployment);
-                    return { ...f, provider, azure_openai_deployment: deployment, model_id: deployment };
-                  }
-                  return {
-                    ...f,
-                    provider,
-                    model_id: GROQ_MODEL_REPLACEMENTS[f.model_id] || (AZURE_DEPLOYMENT_IDS.includes(f.model_id) ? 'openai/gpt-oss-120b' : f.model_id),
-                  };
-                });
-              }}
-            >
-              <option value="groq">Groq</option>
-              <option value="azure">Azure OpenAI (South India)</option>
-            </select>
-          </div>
-          {llmForm.provider === 'groq' ? (
-            <div>
-              <label className={labelCls}>Groq model</label>
-              <select className={inputCls} value={llmForm.model_id} onChange={(e) => setLlmForm((f) => ({ ...f, model_id: e.target.value }))}>
-                <option value="openai/gpt-oss-120b">openai/gpt-oss-120b</option>
-                <option value="openai/gpt-oss-20b">openai/gpt-oss-20b</option>
-              </select>
-            </div>
-          ) : (
-            <div className="grid sm:grid-cols-2 gap-3">
-              <div className="sm:col-span-2">
-                <label className={labelCls}>Azure OpenAI endpoint</label>
-                <input
-                  className={inputCls}
-                  placeholder="https://interview-azure-openai.openai.azure.com"
-                  value={llmForm.azure_openai_endpoint}
-                  onChange={(e) => setLlmForm((f) => ({ ...f, azure_openai_endpoint: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className={labelCls}>Deployment name</label>
-                <select
-                  className={inputCls}
-                  value={resolveAzureDeployment(llmForm.azure_openai_deployment)}
-                  onChange={(e) => setLlmForm((f) => ({ ...f, azure_openai_deployment: e.target.value, model_id: e.target.value }))}
-                >
-                  {AZURE_DEPLOYMENTS.map((item) => (
-                    <option key={item.value} value={item.value}>{item.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className={labelCls}>API version</label>
-                <input
-                  className={inputCls}
-                  value={llmForm.azure_openai_api_version}
-                  onChange={(e) => setLlmForm((f) => ({ ...f, azure_openai_api_version: e.target.value }))}
-                />
-              </div>
-            </div>
-          )}
-          <div>
-            <label className={labelCls}>Temperature ({Number(llmForm.temperature).toFixed(2)})</label>
-            <input type="range" min="0" max="1" step="0.05" value={llmForm.temperature} onChange={(e) => setLlmForm((f) => ({ ...f, temperature: e.target.value }))} className="w-full accent-blue-500" />
-          </div>
-          <div>
-            <label className={labelCls}>Max tokens</label>
-            <input type="number" min="256" max="32768" className={inputCls} value={llmForm.max_tokens} onChange={(e) => setLlmForm((f) => ({ ...f, max_tokens: e.target.value }))} />
-          </div>
-          <div>
-            <label className={labelCls}>Prompt style</label>
-            <select className={inputCls} value={llmForm.prompt_style} onChange={(e) => setLlmForm((f) => ({ ...f, prompt_style: e.target.value }))}>
-              <option value="detailed_analysis">Detailed analysis</option>
-              <option value="quick_summary">Quick summary</option>
-              <option value="technical_focus">Technical focus</option>
-              <option value="cultural_fit_focus">Cultural fit focus</option>
-            </select>
-          </div>
-          <div className="grid sm:grid-cols-2 gap-3">
-            <div>
-              <label className={labelCls}>Speech-to-text</label>
-              <select className={inputCls} value={llmForm.stt_provider} onChange={(e) => setLlmForm((f) => ({ ...f, stt_provider: e.target.value }))}>
-                <option value="groq">Groq Whisper</option>
-                <option value="azure">Azure Speech (Foundry / East US 2)</option>
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Text-to-speech</label>
-              <select className={inputCls} value={llmForm.tts_provider} onChange={(e) => setLlmForm((f) => ({ ...f, tts_provider: e.target.value }))}>
-                <option value="edge">Edge TTS (current default)</option>
-                <option value="azure">Azure Speech TTS</option>
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Azure Speech region</label>
-              <input className={inputCls} value={llmForm.azure_speech_region} onChange={(e) => setLlmForm((f) => ({ ...f, azure_speech_region: e.target.value }))} />
-            </div>
-            <div>
-              <label className={labelCls}>STT endpoint</label>
-              <input
-                className={inputCls}
-                placeholder="https://eastus2.stt.speech.microsoft.com"
-                value={llmForm.azure_speech_stt_endpoint}
-                onChange={(e) => setLlmForm((f) => ({ ...f, azure_speech_stt_endpoint: e.target.value }))}
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label className={labelCls}>TTS endpoint</label>
-              <input
-                className={inputCls}
-                placeholder="https://eastus2.tts.speech.microsoft.com"
-                value={llmForm.azure_speech_tts_endpoint}
-                onChange={(e) => setLlmForm((f) => ({ ...f, azure_speech_tts_endpoint: e.target.value }))}
-              />
-            </div>
-          </div>
-          <p className="text-xs text-muted">
-            Groq key {system?.integration?.groq_api_key_masked || system?.integration?.api_key_masked}. Azure OpenAI {system?.integration?.azure_openai_api_key_masked}. Speech {system?.integration?.azure_speech_key_masked}. Edit keys on API &amp; Integration.
-          </p>
-          <button type="submit" disabled={saving} className="btn-primary inline-flex items-center gap-2">
-            <Save size={14} /> Save LLM settings
-          </button>
-        </form>
+        <LlmCatalogTab
+          aiModel={system?.ai_model}
+          integration={system?.integration}
+          onMessage={setMessage}
+          onError={setError}
+        />
       )}
 
       {tab === 'integration' && (
