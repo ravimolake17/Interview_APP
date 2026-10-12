@@ -42,6 +42,26 @@ class PreferenceSettings(BaseModel):
     notifications: NotificationSettings = Field(default_factory=NotificationSettings)
 
 
+class AICatalogEntry(BaseModel):
+    """One chat / STT / TTS option shown in SuperAdmin model catalog."""
+
+    id: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=255)
+    kind: Literal["chat", "stt", "tts"]
+    provider: Literal["azure", "groq", "edge"]
+    model_id: str = Field(min_length=1, max_length=255)
+    endpoint: str = Field(default="", max_length=512)
+    api_version: str = Field(default="", max_length=64)
+    region: str = Field(default="", max_length=64)
+    enabled: bool = True
+    voice: Literal["", "female", "male"] = ""
+
+    @field_validator("id", "name", "model_id", "endpoint", "api_version", "region", "voice")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
 class AIModelSettings(BaseModel):
     provider: Literal["groq", "azure"] = "groq"
     model_id: str = Field(default="openai/gpt-oss-120b", min_length=1, max_length=120)
@@ -61,6 +81,16 @@ class AIModelSettings(BaseModel):
     azure_speech_region: str = Field(default="eastus2", max_length=64)
     azure_speech_stt_endpoint: str = Field(default="", max_length=512)
     azure_speech_tts_endpoint: str = Field(default="", max_length=512)
+    # SuperAdmin primary/fallback catalogs (empty lists = use built-in defaults)
+    chat_models: list[AICatalogEntry] = Field(default_factory=list)
+    stt_models: list[AICatalogEntry] = Field(default_factory=list)
+    tts_models: list[AICatalogEntry] = Field(default_factory=list)
+    chat_primary_id: str = Field(default="", max_length=120)
+    chat_fallback_id: str = Field(default="", max_length=120)
+    stt_primary_id: str = Field(default="", max_length=120)
+    stt_fallback_id: str = Field(default="", max_length=120)
+    tts_primary_id: str = Field(default="", max_length=120)
+    tts_fallback_id: str = Field(default="", max_length=120)
 
     @field_validator(
         "azure_openai_endpoint",
@@ -69,6 +99,12 @@ class AIModelSettings(BaseModel):
         "azure_speech_region",
         "azure_speech_stt_endpoint",
         "azure_speech_tts_endpoint",
+        "chat_primary_id",
+        "chat_fallback_id",
+        "stt_primary_id",
+        "stt_fallback_id",
+        "tts_primary_id",
+        "tts_fallback_id",
     )
     @classmethod
     def strip_optional_text(cls, value: str) -> str:
