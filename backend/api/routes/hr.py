@@ -420,6 +420,8 @@ async def shortlist_candidate(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        old_value={"status": previous_status},
+        new_value={"status": CandidateStatus.SHORTLISTED.value},
         details={
             "previous_status": previous_status,
             "new_status": CandidateStatus.SHORTLISTED.value,
@@ -469,6 +471,8 @@ async def reject_candidate_route(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        old_value={"status": previous_status},
+        new_value={"status": CandidateStatus.REJECTED.value},
         details={
             "previous_status": previous_status,
             "new_status": CandidateStatus.REJECTED.value,

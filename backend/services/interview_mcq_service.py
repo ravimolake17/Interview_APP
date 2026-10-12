@@ -18,6 +18,7 @@ from agents.interview_agent.mcq import (
     mcq_rules_message,
     oral_rules_message,
 )
+from agents.shared.model_catalog import primary_interviewer_name
 from models.candidate import Candidate
 from repositories.blueprint_repository import BlueprintRepository
 from repositories.company_repository import CompanyRepository
@@ -240,6 +241,7 @@ async def ensure_mcq(
             first_name=first_name,
             company_name=company,
             role=candidate.job_position or "",
+            interviewer_name=primary_interviewer_name(),
         ),
         "rules_message": mcq_rules_message(minutes=max(1, round(duration / 60)), count=len(questions)),
         "oral_rules_message": oral_rules_message(),

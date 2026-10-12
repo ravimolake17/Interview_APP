@@ -117,6 +117,7 @@ async def create_department(
         request=request,
         ip_address=get_client_ip(request),
         details={"name": row.name, "company_id": company_id},
+        new_value={"name": row.name, "description": row.description, "is_active": row.is_active},
         message=f"{admin.full_name} created department {row.name}.",
         company_id=company_id,
     )
@@ -143,6 +144,12 @@ async def update_department(
     if not is_super_admin(admin):
         require_scope_allows(scope, row.company_id)
     data = payload.model_dump(exclude_unset=True)
+    before = {
+        "name": row.name,
+        "description": row.description,
+        "is_active": row.is_active,
+        "sort_order": row.sort_order,
+    }
     if "name" in data:
         existing = await repo.get_by_name(data["name"], company_id=row.company_id)
         if existing and existing.id != row.id:
@@ -154,6 +161,12 @@ async def update_department(
         row.is_active = data["is_active"]
     if "sort_order" in data and data["sort_order"] is not None:
         row.sort_order = data["sort_order"]
+    after = {
+        "name": row.name,
+        "description": row.description,
+        "is_active": row.is_active,
+        "sort_order": row.sort_order,
+    }
     await AuditService(db).log(
         action="DEPARTMENT_UPDATED",
         entity_type="department",
@@ -162,6 +175,8 @@ async def update_department(
         request=request,
         ip_address=get_client_ip(request),
         details={"name": row.name, "updated_fields": sorted(data.keys())},
+        old_value=before,
+        new_value=after,
         message=f"{admin.full_name} updated department {row.name}.",
         company_id=row.company_id,
     )

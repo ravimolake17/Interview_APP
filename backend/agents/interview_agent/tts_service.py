@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 import soundfile as sf
+from xml.sax.saxutils import escape as xml_escape
+
 from dotenv import load_dotenv
 
 # Ensure HF_TOKEN / TTS_* from backend/.env are visible via os.getenv.
@@ -91,6 +93,21 @@ def resolve_engine() -> str:
 
 
 def tts_available() -> bool:
+    try:
+        from agents.screening_agent.config import settings as screening_settings
+        from agents.shared.model_catalog import ordered_targets
+
+        targets = ordered_targets("tts")
+        if any(entry.provider == "azure" for entry in targets) and getattr(
+            screening_settings, "AZURE_SPEECH_KEY", None
+        ):
+            return True
+        if any(entry.provider == "edge" for entry in targets):
+            import edge_tts  # noqa: F401
+
+            return True
+    except Exception:
+        pass
     engine = resolve_engine()
     if engine == "edge":
         try:
@@ -219,25 +236,10 @@ def synthesize_speech(
         )
 
     chosen_voice = _normalize_voice(voice)
-    engine = resolve_engine()
     t0 = time.perf_counter()
-
-    if engine == "edge":
-        audio_bytes, sample_rate, content_type, provider, model_id = _synthesize_edge(
-            cleaned, voice=chosen_voice
-        )
-    else:
-        model_id = (model or MODEL_ID).strip() or MODEL_ID
-        if not _cuda_available():
-            logger.warning(
-                "Parler-TTS on CPU is very slow (minutes/clip). "
-                "Set TTS_ENGINE=edge for fast Indian English, or use an NVIDIA GPU."
-            )
-        audio_bytes, sample_rate = _synthesize_parler(
-            cleaned, voice=chosen_voice, model_id=model_id
-        )
-        content_type = "audio/wav"
-        provider = TTS_PROVIDER
+    audio_bytes, sample_rate, content_type, provider, model_id, engine = _synthesize_with_fallback(
+        cleaned, voice=chosen_voice, model=model
+    )
 
     if not audio_bytes:
         raise RuntimeError("TTS returned empty audio.")
@@ -266,6 +268,135 @@ def synthesize_speech(
     }
 
 
+def _synthesize_with_fallback(
+    cleaned: str, *, voice: str, model: str
+) -> tuple[bytes, int, str, str, str, str]:
+    from agents.shared.model_catalog import describe_target, ordered_targets, should_fallback
+
+    targets = ordered_targets("tts")
+    last_error: Exception | None = None
+    for index, entry in enumerate(targets or [None]):
+        try:
+            return _synthesize_entry(entry, cleaned, voice=voice, model=model)
+        except Exception as exc:
+            last_error = exc
+            if targets and index < len(targets) - 1 and should_fallback(exc):
+                nxt = targets[index + 1]
+                logger.warning(
+                    "TTS %s failed (%s); falling back to %s",
+                    describe_target(entry) if entry else "primary",
+                    exc,
+                    describe_target(nxt),
+                )
+                continue
+            if not targets:
+                break
+            raise
+    engine = resolve_engine()
+    if engine == "edge":
+        audio_bytes, sample_rate, content_type, provider, model_id = _synthesize_edge(
+            cleaned, voice=voice
+        )
+        return audio_bytes, sample_rate, content_type, provider, model_id, "edge"
+    if not _cuda_available():
+        logger.warning(
+            "Parler-TTS on CPU is very slow (minutes/clip). "
+            "Set TTS_ENGINE=edge for fast Indian English, or use an NVIDIA GPU."
+        )
+    model_id = (model or MODEL_ID).strip() or MODEL_ID
+    audio_bytes, sample_rate = _synthesize_parler(cleaned, voice=voice, model_id=model_id)
+    return audio_bytes, sample_rate, "audio/wav", TTS_PROVIDER, model_id, "parler"
+
+
+def synthesize_speech_for_entry(entry, text: str) -> dict[str, Any]:
+    """Speak with one catalog row only (SuperAdmin test). No fallback."""
+    from agents.shared.model_catalog import voice_for_entry
+
+    cleaned = _humanize_script(text)
+    if not cleaned:
+        raise ValueError("Empty text for TTS.")
+    gender = voice_for_entry(entry)
+    audio_bytes, sample_rate, content_type, provider, model_id, engine = _synthesize_entry(
+        entry, cleaned, voice=gender, model=getattr(entry, "model_id", None) or MODEL_ID
+    )
+    if not audio_bytes:
+        raise RuntimeError("TTS returned empty audio.")
+    return {
+        "audio_bytes": audio_bytes,
+        "content_type": content_type,
+        "provider": provider,
+        "model": model_id,
+        "voice": gender,
+        "sample_rate": sample_rate,
+        "text": cleaned,
+        "engine": engine,
+    }
+
+
+def _neural_for_entry(entry, voice: str) -> str:
+    mid = str(getattr(entry, "model_id", None) or "").strip()
+    if mid:
+        return mid
+    return _EDGE_VOICES[_normalize_voice(voice or getattr(entry, "voice", None))]
+
+
+def _synthesize_entry(entry, cleaned: str, *, voice: str, model: str):
+    provider = (getattr(entry, "provider", None) or resolve_engine()).strip().lower()
+    if provider == "azure":
+        return _synthesize_azure_speech(cleaned, voice=voice, entry=entry)
+    if provider == "edge":
+        audio_bytes, sample_rate, content_type, tts_provider, model_id = _synthesize_edge(
+            cleaned, voice=voice, neural=_neural_for_entry(entry, voice)
+        )
+        return audio_bytes, sample_rate, content_type, tts_provider, model_id, "edge"
+    model_id = (getattr(entry, "model_id", None) or model or MODEL_ID).strip() or MODEL_ID
+    audio_bytes, sample_rate = _synthesize_parler(cleaned, voice=voice, model_id=model_id)
+    return audio_bytes, sample_rate, "audio/wav", TTS_PROVIDER, model_id, "parler"
+
+
+def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes, int, str, str, str, str]:
+    import httpx
+
+    from agents.screening_agent.config import settings
+
+    key = getattr(settings, "AZURE_SPEECH_KEY", None)
+    region = (
+        getattr(entry, "region", None)
+        or getattr(settings, "AZURE_SPEECH_REGION", "")
+        or "eastus2"
+    ).strip()
+    endpoint = (
+        getattr(entry, "endpoint", None)
+        or getattr(settings, "AZURE_SPEECH_TTS_ENDPOINT", "")
+        or f"https://{region}.tts.speech.microsoft.com"
+    ).rstrip("/")
+    if not key:
+        raise RuntimeError("Azure Speech key is not configured in SuperAdmin → API & Integration.")
+    neural = _neural_for_entry(entry, voice)
+    ssml = (
+        f'<speak version="1.0" xml:lang="en-IN">'
+        f'<voice xml:lang="en-IN" name="{xml_escape(neural)}">{xml_escape(cleaned)}</voice>'
+        f"</speak>"
+    )
+    response = httpx.post(
+        f"{endpoint}/cognitiveservices/v1",
+        headers={
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
+            "User-Agent": "InterviewAgenticAI",
+        },
+        content=ssml.encode("utf-8"),
+        timeout=60,
+    )
+    response.raise_for_status()
+    if not response.content:
+        raise RuntimeError("Azure Speech TTS returned empty audio.")
+    wav_bytes, content_type = _mp3_to_wav(response.content)
+    sample_rate = 16000 if content_type == "audio/wav" else 0
+    return wav_bytes, sample_rate, content_type, "azure_speech_tts", neural, "azure"
+
+
 def warmup_tts() -> dict[str, Any]:
     """Load model / verify Edge once so the first user request is not cold."""
     global _warmup_done
@@ -290,11 +421,13 @@ def warmup_tts() -> dict[str, Any]:
         return {"ok": False, "engine": engine, "error": str(exc)}
 
 
-def _synthesize_edge(cleaned: str, *, voice: str) -> tuple[bytes, int, str, str, str]:
+def _synthesize_edge(
+    cleaned: str, *, voice: str, neural: str | None = None
+) -> tuple[bytes, int, str, str, str]:
     """Fast cloud neural TTS (Indian English). Returns WAV bytes."""
     import edge_tts
 
-    edge_voice = _EDGE_VOICES[_normalize_voice(voice)]
+    edge_voice = (neural or "").strip() or _EDGE_VOICES[_normalize_voice(voice)]
 
     async def _run() -> bytes:
         communicate = edge_tts.Communicate(cleaned, edge_voice)
@@ -304,15 +437,30 @@ def _synthesize_edge(cleaned: str, *, voice: str) -> tuple[bytes, int, str, str,
                 buf.write(chunk["data"])
         return buf.getvalue()
 
-    try:
-        mp3_bytes = asyncio.run(_run())
-    except RuntimeError:
-        # Already inside an event loop (e.g. called from async thread wrongly).
+    def _run_in_fresh_loop() -> bytes:
         loop = asyncio.new_event_loop()
         try:
-            mp3_bytes = loop.run_until_complete(_run())
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(_run())
         finally:
             loop.close()
+            asyncio.set_event_loop(None)
+
+    try:
+        asyncio.get_running_loop()
+        in_loop = True
+    except RuntimeError:
+        in_loop = False
+    if in_loop:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            mp3_bytes = pool.submit(_run_in_fresh_loop).result(timeout=60)
+    else:
+        try:
+            mp3_bytes = asyncio.run(_run())
+        except RuntimeError:
+            mp3_bytes = _run_in_fresh_loop()
 
     if not mp3_bytes:
         raise RuntimeError("Edge TTS returned empty audio.")

@@ -164,6 +164,12 @@ async def create_user(
         request=request,
         ip_address=get_client_ip(request),
         details={"email": user.email, "role": user.role.value, "full_name": user.full_name},
+        new_value={
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role.value,
+            "is_active": user.is_active,
+        },
         message=(
             f"{admin.full_name} created {user.role.value} user {user.full_name} "
             f"({user.email})."

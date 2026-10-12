@@ -47,7 +47,10 @@ Walk top to bottom. Preserve section headings, order, and complete raw text. Nev
 summarize, or omit content. Output exactly an object with a `sections` array. Each section
 must contain section_id, heading, heading_source, order, content_type, items, and raw_text.
 Allowed content_type values: text, list, key_value, table. Contact sections may include
-`detected_contacts` with emails, phones, and links. Section IDs must be short snake_case.
+`detected_contacts` with emails, phones, and links. Phones must be telephone numbers only —
+never education or employment year ranges such as 2013-2017. Education rows (degrees,
+institutes, academic years) must stay in education sections, not experience. Section IDs
+must be short snake_case.
 """
 
 
@@ -148,37 +151,23 @@ def _is_rate_limited(exc: BaseException) -> bool:
 
 
 def _call_groq(system_prompt: str, user_prompt: str, *, retry_rate_limit: bool = True) -> str:
-    client = _groq_client()
-    if client is None:
-        raise RuntimeError("Groq is not configured.")
+    from agents.shared.llama_client import call_llama, llama_available
+
+    if not llama_available():
+        raise RuntimeError("No chat model is configured.")
     last_error: Exception | None = None
     attempts = 5 if retry_rate_limit else 1
+    styled = f"{user_prompt}\n\nAnalysis style: {prompt_style_instruction()}"
     for attempt in range(attempts):
         try:
-            response = client.chat.completions.create(
-                model=settings.GROQ_MODEL,
-                temperature=settings.GROQ_TEMPERATURE,
-                response_format={"type": "json_object"},
-                max_tokens=settings.GROQ_MAX_TOKENS,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": f"{user_prompt}\n\nAnalysis style: {prompt_style_instruction()}",
-                    },
-                ],
-            )
-            content = response.choices[0].message.content
-            if not content:
-                raise ValueError("Groq returned an empty response.")
-            return content.strip()
+            return call_llama(system_prompt, styled, json_mode=True)
         except Exception as exc:
             last_error = exc
             if retry_rate_limit and attempt < attempts - 1 and is_rate_limited(exc):
                 time.sleep(min(16.0, 2.0 * (2 ** attempt)))
                 continue
             raise
-    raise last_error or RuntimeError("Groq resume extraction failed.")
+    raise last_error or RuntimeError("Resume LLM extraction failed.")
 
 
 def _section_id(heading: str, used: set[str]) -> str:
@@ -399,11 +388,14 @@ def extract_resume_data(text: str) -> dict[str, Any]:
     if not source_text:
         raise ValueError("Resume text cannot be empty.")
 
-    if _groq_client() is None or not settings.USE_LLM_FOR_RESUME_PARSING:
+    from agents.shared.llama_client import llama_available
+    from agents.shared.model_catalog import uses_groq_primary_chat
+
+    if not llama_available() or not settings.USE_LLM_FOR_RESUME_PARSING:
         warning = (
             "Resume LLM parsing is disabled; the deterministic parser was used."
-            if _groq_client() is not None
-            else "Groq is not configured; the deterministic parser was used."
+            if llama_available()
+            else "No chat model is configured; the deterministic parser was used."
         )
         return _fallback_result(source_text, warning)
 
@@ -427,12 +419,12 @@ def extract_resume_data(text: str) -> dict[str, Any]:
                 system_prompt += (
                     " Previous output was invalid. Return one valid JSON object only."
                 )
+
+            def _invoke(prompt=system_prompt):
+                return _call_groq(prompt, user_prompt, retry_rate_limit=False)
+
             raw = _strip_code_fences(
-                queue.call(
-                    lambda prompt=system_prompt: _call_groq(
-                        prompt, user_prompt, retry_rate_limit=False
-                    )
-                )
+                queue.call(_invoke) if uses_groq_primary_chat() else _invoke()
             )
             parsed = json.loads(raw)
             if not isinstance(parsed, dict):

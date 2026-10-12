@@ -180,13 +180,25 @@ def oral_rules_message() -> str:
     )
 
 
-def intro_message(*, first_name: str, company_name: str, role: str) -> str:
+def intro_message(
+    *,
+    first_name: str,
+    company_name: str,
+    role: str,
+    interviewer_name: str = "",
+) -> str:
     name = first_name.strip() or "there"
     company = company_name.strip() or "RR Parkon"
     role_phrase = f" for the {role.strip()} position" if role.strip() else ""
+    persona = interviewer_name.strip()
+    who = (
+        f"I'm {persona}, your AI interviewer today{role_phrase}."
+        if persona
+        else f"I'm your AI interviewer today{role_phrase}."
+    )
     return (
         f"Hello {name}, welcome to {company} — part of RR Global. "
-        f"I'm your AI interviewer today{role_phrase}. "
+        f"{who} "
         "RR Global builds intelligent recruitment and enterprise software solutions. "
         "This interview is confidential and proctored to ensure fairness for every candidate."
     )

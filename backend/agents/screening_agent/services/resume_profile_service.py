@@ -13,7 +13,9 @@ from agents.screening_agent.schemas.ats import (
 from agents.screening_agent.services.section_detector import detect_sections
 from agents.screening_agent.services.resume_parser import (
     extract_emails_from_text,
+    extract_phones_from_text,
     guess_candidate_name,
+    is_plausible_phone,
 )
 from agents.screening_agent.services.skill_extractor import (
     extract_resume_skills,
@@ -82,6 +84,11 @@ _EDUCATION_HEADING = re.compile(
 _CERT_HEADING = re.compile(
     r"certification|certificate|"
     r"licen[cs]e|training|course",
+    re.I,
+)
+
+_CONTACT_HEADING = re.compile(
+    r"header|contact(?: information)?|personal details",
     re.I,
 )
 
@@ -682,12 +689,26 @@ def _clean_header_line(
     )
 
 
+def _is_contact_detail_line(line: str) -> bool:
+    value = str(line or "").strip()
+    if not value:
+        return False
+    if _EMAIL.search(value) or _URL.search(value):
+        return True
+    if _PHONE.search(value) and not _ROLE_WORDS.search(value):
+        return True
+    return False
+
+
 def _guess_role_company(
     lines: list[str],
 ) -> tuple[str, str]:
     headers: list[str] = []
 
     for line in lines:
+        if _is_contact_detail_line(line):
+            continue
+
         if _line_has_date_range(line):
             remainder = _clean_header_line(line)
             # Skip pure date lines; keep titles that embed a date range.
@@ -698,7 +719,7 @@ def _guess_role_company(
             line
         )
 
-        if not cleaned:
+        if not cleaned or _is_contact_detail_line(cleaned):
             continue
 
         if re.match(
@@ -1190,11 +1211,60 @@ def _looks_like_education_block(text: str) -> bool:
     has_degree = bool(_DEGREE_LINE.search(text))
     has_school = bool(_UNIVERSITY_LINE.search(text))
     has_job_role = bool(_ROLE_WORDS.search(compact))
-    if has_degree and has_school and not has_job_role:
-        return True
+    has_duties = bool(_DUTY_VERB_RE.search(text))
+    # Staff/faculty jobs at a university still count as employment.
+    if has_job_role and has_duties:
+        return False
+    if has_job_role and has_school and not has_degree:
+        return False
     if has_degree and not has_job_role:
         return True
+    if has_school and not has_job_role and not has_duties:
+        return True
+    if has_degree and has_school and not has_duties:
+        return True
     return False
+
+
+def _is_education_experience_entry(entry: ExperienceEntry) -> bool:
+    blob = " ".join(
+        part
+        for part in (entry.role, entry.company, entry.text, entry.source_section)
+        if part
+    )
+    if _EDUCATION_HEADING.search(entry.source_section or ""):
+        return True
+    if _looks_like_education_block(blob):
+        return True
+    if (
+        entry.role
+        and _DEGREE_LINE.search(entry.role)
+        and (_UNIVERSITY_LINE.search(blob) or _DEGREE_LINE.search(entry.role))
+        and not _DUTY_VERB_RE.search(entry.text or "")
+    ):
+        return True
+    return False
+
+
+def _is_contact_timeline_entry(entry: ExperienceEntry) -> bool:
+    """Header blocks like name + email + '2013 - 2017 · 2017 - 2019' are not jobs."""
+    blob = " ".join(
+        part for part in (entry.role, entry.company, entry.text) if part
+    )
+    if _ROLE_WORDS.search(blob) or _DUTY_VERB_RE.search(blob):
+        return False
+    if _is_contact_detail_line(entry.company or "") or _is_contact_detail_line(entry.role or ""):
+        return True
+    range_count = len(_RANGE_RE.findall(blob))
+    if range_count >= 2:
+        return True
+    if _EMAIL.search(blob) and not _COMPANY_WORDS.search(entry.company or ""):
+        return True
+    return False
+
+
+def _is_non_work_experience_entry(entry: ExperienceEntry) -> bool:
+    return _is_education_experience_entry(entry) or _is_contact_timeline_entry(entry)
 
 
 def _extract_experience_entries(
@@ -1258,9 +1328,14 @@ def _extract_experience_entries(
             text_entries
         )
 
-    recovered_source = full_text or "\n".join(
-        str(row.get("text", "")) for row in rows if str(row.get("text", "")).strip()
-    )
+    recovered_source = "\n\n".join(
+        str(row.get("text", ""))
+        for row in rows
+        if str(row.get("text", "")).strip()
+        and not _EDUCATION_HEADING.search(str(row.get("heading", "")))
+        and not _CERT_HEADING.search(str(row.get("heading", "")))
+        and not _CONTACT_HEADING.search(str(row.get("heading", "")))
+    ).strip() or (full_text or "")
     recovered = _entries_from_text_section(
         recovered_source,
         heading="Experience",
@@ -1272,10 +1347,12 @@ def _extract_experience_entries(
         if entry.start_month_index is not None and entry.end_month_index is not None
     }
     for entry in recovered:
-        if _looks_like_education_block(entry.text):
+        if _is_non_work_experience_entry(entry):
             continue
         blob = " ".join(part for part in (entry.role, entry.company, entry.text) if part)
-        if not _ROLE_WORDS.search(blob) and not entry.company:
+        if not _ROLE_WORDS.search(blob) and (
+            not entry.company or _is_contact_detail_line(entry.company)
+        ):
             continue
         span = (entry.start_month_index, entry.end_month_index)
         if span[0] is not None and span in seen_spans:
@@ -1284,7 +1361,11 @@ def _extract_experience_entries(
             seen_spans.add(span)
         entries.append(entry)
 
-    return _dedupe_entries(entries)
+    return [
+        entry
+        for entry in _dedupe_entries(entries)
+        if not _is_non_work_experience_entry(entry)
+    ]
 
 
 def _merge_intervals(
@@ -1882,10 +1963,13 @@ def _candidate_details(
     if not name and emails:
         name = _name_from_structured_email(emails[0])
 
-    phones = dedupe_preserve(
-        [match.group(0).strip() for match in _PHONE.finditer(contact_scan)]
-        + detected_phones
-    )
+    phones = [
+        phone
+        for phone in dedupe_preserve(
+            extract_phones_from_text(contact_scan) + detected_phones
+        )
+        if is_plausible_phone(phone)
+    ]
     links = dedupe_preserve(
         [match.group(0).rstrip(".,)") for match in _URL.finditer(contact_scan)]
         + detected_links

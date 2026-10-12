@@ -1,6 +1,8 @@
 from agents.screening_agent.services.resume_parser import (
     extract_emails_from_text,
+    extract_phones_from_text,
     guess_candidate_name,
+    is_plausible_phone,
     parse_resume,
 )
 from agents.screening_agent.services.resume_profile_service import build_candidate_profile
@@ -349,3 +351,123 @@ def test_two_column_education_is_taken_from_following_section_prefix():
     assert "Programming Languages" not in joined
     assert "hospital bill" not in joined.casefold()
     assert "master data" not in joined.casefold()
+
+
+def test_year_ranges_are_not_treated_as_phone_numbers():
+    text = (
+        "Arjun Mehta\n"
+        "arjun.mehta@example.com\n"
+        "+91 90000 00000\n"
+        "2013 - 2017 · 2017 - 2019 · 2019 - 2021 · 2022 - 2023 · 2023 - 2025\n"
+        "linkedin.com/in/arjun-mehta\n"
+        "Education\n"
+        "Indian Institute of Management Ahmedabad | 2019 - 2021 | MBA\n"
+    )
+    assert is_plausible_phone("+91 90000 00000")
+    assert is_plausible_phone("9000000000")
+    assert not is_plausible_phone("2013 - 2017")
+    assert not is_plausible_phone("2017-2019")
+    phones = extract_phones_from_text(text)
+    assert phones == ["+91 90000 00000"]
+
+    parsed = parse_resume(text)
+    parsed["source_text"] = text
+    profile = build_candidate_profile(parsed)
+    assert profile.candidate_details.phones == ["+91 90000 00000"]
+
+
+def test_education_dates_are_not_counted_as_professional_experience():
+    text = (
+        "Arjun Mehta\n"
+        "arjun.mehta@example.com\n"
+        "+91 90000 00000\n"
+        "2013 - 2017 · 2017 - 2019 · 2019 - 2021 · 2022 - 2023 · 2023 - 2025\n"
+        "Experience\n"
+        "Senior Mendix Developer @ Vantage Low-Code, Pune\n"
+        "Feb 2025 – Present\n"
+        "Delivered Mendix applications and enterprise integrations.\n"
+        "Mendix Developer @ Harborline Systems, Mumbai\n"
+        "Jun 2023 – Jan 2025\n"
+        "Built low-code onboarding workflows.\n"
+        "Software Engineer @ Acme Corp\n"
+        "Jan 2022 – May 2023\n"
+        "Developed REST APIs.\n"
+        "Education\n"
+        "Indian Institute of Management Ahmedabad | 2019 - 2021 | MBA, Information Technology\n"
+        "Indian Institute of Technology Delhi | 2017 - 2019 | M.Tech, Artificial Intelligence "
+        "& Machine Learning - Application Development\n"
+        "Indian Institute of Technology Delhi | 2013 - 2017 | B.Tech, Computer Science\n"
+    )
+    parsed = parse_resume(text)
+    parsed["source_text"] = text
+    profile = build_candidate_profile(parsed)
+
+    assert profile.candidate_details.phones == ["+91 90000 00000"]
+    assert any("MBA" in line for line in profile.education)
+    assert any("M.Tech" in line or "IIT" in line or "Technology Delhi" in line for line in profile.education)
+
+    work = [
+        entry
+        for entry in profile.experience_entries
+        if entry.entry_type == "employment"
+    ]
+    work_text = " ".join(
+        f"{entry.role} {entry.company} {entry.text}" for entry in work
+    ).casefold()
+    assert "indian institute of management" not in work_text
+    assert "m.tech" not in work_text
+    assert "b.tech" not in work_text
+    assert any("vantage" in (entry.company or "").casefold() or "mendix" in (entry.role or "").casefold() for entry in work)
+    assert all("@example.com" not in f"{entry.role} {entry.company}".casefold() for entry in work)
+
+    # Work is 2022–present (~4–5 years). Education 2013–2021 must not inflate this to ~9.
+    assert profile.total_experience_years is not None
+    assert 3.5 <= profile.total_experience_years <= 6.5
+
+
+def test_structured_education_items_under_experience_are_dropped():
+    parsed = {
+        "sections": [
+            {
+                "heading": "Experience",
+                "items": [
+                    {
+                        "role": "MBA, Information Technology",
+                        "company": "Indian Institute of Management Ahmedabad",
+                        "dates": "2019 - 2021",
+                    },
+                    {
+                        "role": "Senior Mendix Developer",
+                        "company": "Vantage Low-Code",
+                        "dates": "Feb 2025 - Present",
+                        "description": "Delivered Mendix applications.",
+                    },
+                ],
+                "raw_text": (
+                    "MBA, Information Technology\n"
+                    "Indian Institute of Management Ahmedabad\n"
+                    "2019 - 2021\n"
+                    "Senior Mendix Developer\n"
+                    "Vantage Low-Code\n"
+                    "Feb 2025 - Present\n"
+                    "Delivered Mendix applications."
+                ),
+            }
+        ],
+        "extraction_method": "rule_based_fallback",
+        "source_text": (
+            "Experience\n"
+            "MBA, Information Technology, Indian Institute of Management Ahmedabad, 2019 - 2021\n"
+            "Senior Mendix Developer, Vantage Low-Code, Feb 2025 - Present\n"
+            "Delivered Mendix applications.\n"
+        ),
+    }
+    profile = build_candidate_profile(parsed)
+    work = [
+        entry
+        for entry in profile.experience_entries
+        if entry.entry_type == "employment"
+    ]
+    assert work
+    assert all("management ahmedabad" not in f"{entry.company} {entry.role}".casefold() for entry in work)
+    assert any("vantage" in (entry.company or "").casefold() for entry in work)

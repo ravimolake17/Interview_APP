@@ -542,6 +542,12 @@ class InterviewAgentService:
             raise ValueError("No question text or cached audio available to speak.")
 
         # Live Indic Parler-TTS fallback (slow) — run off the event loop.
+        if not voice:
+            from agents.shared.model_catalog import ordered_targets, voice_for_entry
+
+            targets = ordered_targets("tts")
+            if targets:
+                voice = voice_for_entry(targets[0])
         result = await asyncio.to_thread(synthesize_speech, text, voice=voice)
         result["cached"] = False
         return result

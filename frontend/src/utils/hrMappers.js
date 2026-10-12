@@ -38,6 +38,16 @@ export function recommendationFromScore(score) {
   return 'Not Recommended';
 }
 
+function isPlausiblePhone(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 24) return false;
+  if (/^(?:19|20)\d{2}\s*[-–—/to]+\s*(?:19|20)\d{2}$/i.test(raw.replace(/\s+/g, ' '))) {
+    return false;
+  }
+  const digits = raw.replace(/\D/g, '');
+  return digits.length >= 10 && digits.length <= 15;
+}
+
 function parseExperienceYears(candidate, snapshot = {}) {
   const parsed = snapshot.parsed_resume || {};
   const breakdown = snapshot.score_breakdown || {};
@@ -428,7 +438,7 @@ export function mapEvaluationToScreeningResult(evaluation, extraction, index = 0
     `Candidate ${index + 1}`;
   const score = Math.round(breakdown.overall_score || 0);
   const emails = asList(candidate.emails || parsedResume.emails);
-  const phones = asList(candidate.phones || parsedResume.phones);
+  const phones = asList(candidate.phones || parsedResume.phones).filter(isPlausiblePhone);
   const education =
     extractEducationFromSnapshot({
       candidate_education: evaluation.candidate_education,

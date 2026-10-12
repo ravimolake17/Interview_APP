@@ -789,9 +789,9 @@ def _groq_client():
 def _parse_with_llm(
     text: str,
 ) -> dict[str, Any] | None:
-    client = _groq_client()
+    from agents.shared.llama_client import call_llama, llama_available
 
-    if not client or not settings.USE_LLM_FOR_JD_PARSING:
+    if not llama_available() or not settings.USE_LLM_FOR_JD_PARSING:
         return None
 
     prompt = """
@@ -828,31 +828,14 @@ especially text such as:
 """ + text[:12000] + f"\n\nAnalysis style: {prompt_style_instruction()}"
 
     try:
-        response = client.chat.completions.create(
-            model=settings.GROQ_MODEL,
-            temperature=settings.GROQ_TEMPERATURE,
-            response_format={"type": "json_object"},
-            max_tokens=settings.GROQ_MAX_TOKENS,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract structured "
-                        "job-description facts and "
-                        "return valid JSON only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
+        content = call_llama(
+            "You extract structured job-description facts and return valid JSON only.",
+            prompt,
+            json_mode=True,
         )
-
-        response_content = response.choices[0].message.content
-        if not response_content:
+        if not content:
             return None
-        content = response_content.strip()
+        content = content.strip()
 
         content = re.sub(
             r"^```(?:json)?\s*|\s*```$",

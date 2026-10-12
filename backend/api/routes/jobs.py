@@ -306,6 +306,7 @@ async def create_job(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     status_label = _job_status_label(job.status)
+    created = _job_update_snapshot(job)
     await AuditService(db).log(
         action="JOB_CREATED",
         entity_type="job",
@@ -320,6 +321,7 @@ async def create_job(
             "location": job.location,
             "experience": job.experience,
         },
+        new_value=created,
         message=_job_create_message(current_user.full_name, job),
         company_id=job.company_id,
     )
@@ -389,6 +391,8 @@ async def update_job(
             "updated_fields": sorted(data.keys()),
             "changes": changes,
         },
+        old_value=before,
+        new_value=after,
         message=_job_update_message(current_user.full_name, job.title, changes),
         company_id=job.company_id,
     )
@@ -432,6 +436,7 @@ async def delete_job(
             request=request,
             ip_address=get_client_ip(request),
             status="FAILURE",
+            old_value=_job_update_snapshot(job),
             details={
                 "title": title,
                 "status": status_label,
@@ -463,6 +468,7 @@ async def delete_job(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        old_value=_job_update_snapshot(job),
         details={
             "title": title,
             "status": status_label,

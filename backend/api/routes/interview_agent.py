@@ -185,6 +185,12 @@ async def add_manual_question(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        new_value={
+            "question_text": payload.question_text,
+            "insert_at": payload.insert_at,
+            "difficulty": payload.difficulty,
+            "category_name": payload.category_name,
+        },
         details={
             "question_set_id": result.id,
             "insert_at": payload.insert_at,
@@ -239,6 +245,13 @@ async def update_manual_question(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        new_value={
+            "question_id": question_id,
+            "question_text": payload.question_text,
+            "insert_at": payload.insert_at,
+            "difficulty": payload.difficulty,
+            "category_name": payload.category_name,
+        },
         details={
             "question_id": question_id,
             "insert_at": payload.insert_at,
@@ -281,6 +294,7 @@ async def delete_manual_question(
         user=current_user,
         request=request,
         ip_address=get_client_ip(request),
+        old_value={"question_id": question_id},
         details={"question_id": question_id, "total_questions": result.total_questions},
         message=f"Deleted interview question {question_id} for {candidate_id}.",
         company_id=_tenant.company_id,

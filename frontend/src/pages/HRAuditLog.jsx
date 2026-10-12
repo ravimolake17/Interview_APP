@@ -135,6 +135,61 @@ const ACTION_CONFIG = {
     icon: Bot,
     badge: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
   },
+  INTEGRATION_SETTINGS_UPDATED: {
+    label: 'API keys',
+    icon: Settings,
+    badge: 'bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-300',
+  },
+  INTERVIEW_HOURS_UPDATED: {
+    label: 'Interview hours',
+    icon: Clock,
+    badge: 'bg-sky-100 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300',
+  },
+  SCREENING_POLICY_UPDATED: {
+    label: 'Screening policy',
+    icon: Settings,
+    badge: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
+  },
+  SMTP_SETTINGS_UPDATED: {
+    label: 'SMTP settings',
+    icon: Mail,
+    badge: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300',
+  },
+  DEPARTMENT_CREATED: {
+    label: 'Department created',
+    icon: Briefcase,
+    badge: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  },
+  DEPARTMENT_UPDATED: {
+    label: 'Department updated',
+    icon: Briefcase,
+    badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+  },
+  COMPANY_CREATED: {
+    label: 'Company created',
+    icon: Settings,
+    badge: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
+  },
+  COMPANY_UPDATED: {
+    label: 'Company updated',
+    icon: Settings,
+    badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+  },
+  SUPER_ADMIN_UPDATE: {
+    label: 'Record updated',
+    icon: Settings,
+    badge: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  },
+  SUPER_ADMIN_CREATE: {
+    label: 'Record created',
+    icon: Settings,
+    badge: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300',
+  },
+  SUPER_ADMIN_DELETE: {
+    label: 'Record removed',
+    icon: Settings,
+    badge: 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300',
+  },
 };
 
 const FILTER_TABS = [
@@ -156,6 +211,12 @@ const SETTINGS_ACTIONS = new Set([
   'COMPANY_SETTINGS_UPDATED',
   'USER_PREFERENCES_UPDATED',
   'AI_SETTINGS_UPDATED',
+  'INTEGRATION_SETTINGS_UPDATED',
+  'INTERVIEW_HOURS_UPDATED',
+  'SCREENING_POLICY_UPDATED',
+  'SMTP_SETTINGS_UPDATED',
+  'COMPANY_UPDATED',
+  'SUPER_ADMIN_UPDATE',
 ]);
 
 const AVATAR_COLORS = ['#7C3AED', '#0891B2', '#059669', '#D97706', '#DB2777', '#2563EB'];
@@ -197,7 +258,8 @@ function formatWhen(value) {
 }
 
 function formatJson(value) {
-  if (!value || (typeof value === 'object' && Object.keys(value).length === 0)) return '—';
+  if (value == null || value === '') return '—';
+  if (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) return '—';
   try {
     return JSON.stringify(value, null, 2);
   } catch {
@@ -205,7 +267,39 @@ function formatJson(value) {
   }
 }
 
+function formatScalar(value) {
+  if (value == null || value === '') return '—';
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+function valuesDiffer(from, to) {
+  if (from === to) return false;
+  try {
+    return JSON.stringify(from) !== JSON.stringify(to);
+  } catch {
+    return true;
+  }
+}
+
 function formatChanges(entry) {
+  const listed = entry.details?.changes;
+  if (Array.isArray(listed) && listed.length) {
+    return listed
+      .map((change) => {
+        if (typeof change === 'string') return change;
+        const field = change.field || change.key || 'value';
+        return `${field}: ${formatScalar(change.from)} → ${formatScalar(change.to)}`;
+      })
+      .join('; ');
+  }
+
   if (entry.old_value || entry.new_value) {
     const keys = new Set([
       ...Object.keys(entry.old_value || {}),
@@ -215,18 +309,11 @@ function formatChanges(entry) {
       .map((key) => {
         const from = entry.old_value?.[key];
         const to = entry.new_value?.[key];
-        if (from === to) return null;
-        return `${key}: ${from ?? '—'} → ${to ?? '—'}`;
+        if (!valuesDiffer(from, to)) return null;
+        return `${key}: ${formatScalar(from)} → ${formatScalar(to)}`;
       })
       .filter(Boolean);
     if (parts.length) return parts.join('; ');
-  }
-
-  const changes = entry.details?.changes;
-  if (Array.isArray(changes) && changes.length) {
-    return changes
-      .map((c) => (typeof c === 'string' ? c : `${c.field} ${c.from} → ${c.to}`))
-      .join('; ');
   }
   return '—';
 }
@@ -540,6 +627,7 @@ export default function HRAuditLog() {
                                 <DetailRow label="Session ID" value={entry.session_id} />
                                 <DetailRow label="Request ID" value={entry.request_id} />
                                 <DetailRow label="Entity ID" value={entry.entity_id} />
+                                <DetailRow label="What changed" value={formatChanges(entry)} />
                                 <DetailRow label="Old Value" value={formatJson(entry.old_value)} />
                                 <DetailRow label="New Value" value={formatJson(entry.new_value)} />
                                 <DetailRow label="Message" value={entry.message} />

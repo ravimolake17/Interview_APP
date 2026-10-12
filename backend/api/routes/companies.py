@@ -60,6 +60,12 @@ async def create_company(
         request=request,
         ip_address=get_client_ip(request),
         details={"name": company.name, "code": company.code},
+        new_value={
+            "name": company.name,
+            "code": company.code,
+            "status": company.status,
+            "logo": company.logo,
+        },
         message=f"{superadmin.full_name} created company {company.name}.",
         company_id=company.id,
     )
@@ -81,10 +87,22 @@ async def update_company(
     if not company:
         raise HTTPException(status_code=404, detail="Company not found.")
     data = payload.model_dump(exclude_unset=True)
+    before = {
+        "name": company.name,
+        "code": company.code,
+        "status": company.status,
+        "logo": company.logo,
+    }
     try:
         company = await service.update(company, **data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    after = {
+        "name": company.name,
+        "code": company.code,
+        "status": company.status,
+        "logo": company.logo,
+    }
     await AuditService(db).log(
         action="COMPANY_UPDATED",
         entity_type="company",
@@ -93,6 +111,8 @@ async def update_company(
         request=request,
         ip_address=get_client_ip(request),
         details={"updated_fields": sorted(data.keys())},
+        old_value=before,
+        new_value=after,
         message=f"{superadmin.full_name} updated company {company.name}.",
         company_id=company.id,
     )

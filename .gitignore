@@ -9,6 +9,12 @@ __pycache__/
 
 # Environment
 .env
+*.env
+!backend/.env.example
+!frontend/**/.env.example
+deploy/vm-env/
+interview.env
+proctor.env
 token.json
 credentials.json
 

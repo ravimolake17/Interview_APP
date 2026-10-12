@@ -284,6 +284,11 @@ app.mount("/screening-files", StaticFiles(directory=screening_uploads_dir), name
 
 @app.get("/")
 async def home():
+    # Prefer HR SPA when built; FastAPI matches "/" before the SPA catch-all.
+    dist_index = Path(__file__).resolve().parent.parent / "frontend" / "dist" / "index.html"
+    if dist_index.is_file():
+        return FileResponse(dist_index, headers={"Cache-Control": "no-cache"})
+
     return {
         "message": "Agentic HR Recruitment System",
         "agents": {

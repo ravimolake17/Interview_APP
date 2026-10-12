@@ -26,7 +26,18 @@ from agents.screening_agent.utils.skill_normalizer import find_known_skills
 
 EMAIL_REGEX = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 _EMAIL_RE = re.compile(EMAIL_REGEX)
-PHONE_REGEX = r"(?:\+91[- ]?)?[6-9]\d{9}|\+?\d[\d\s\-()]{8,15}"
+# Finder only — always pass matches through is_plausible_phone(). The old
+# `\+?\d[\d\s\-()]{8,15}` alternative treated education years like 2013-2017
+# as telephone numbers.
+PHONE_REGEX = (
+    r"(?:\+91[-.\s]*)?[6-9]\d(?:[\s().-]*\d){8}"
+    r"|(?:\+\d{1,3}[-.\s]*)?(?:\(?\d{2,5}\)?[-.\s]*)?\d(?:[\s().-]*\d){8,14}"
+)
+_PHONE_RE = re.compile(PHONE_REGEX)
+_YEAR_RANGE_PHONE_RE = re.compile(
+    r"^(?:19|20)\d{2}\s*[-–—/to]+\s*(?:19|20)\d{2}$",
+    re.I,
+)
 URL_REGEX = r"(?:https?://)?(?:www\.)?[a-zA-Z0-9.-]+\.[A-Za-z]{2,}(?:/\S*)?"
 _MAILTO_RE = re.compile(r"mailto:([^\s>'\"<>]+)", re.I)
 _MD_MAILTO_RE = re.compile(r"\[([^\]]+)\]\(\s*mailto:([^)\s]+)\s*\)", re.I)
@@ -38,6 +49,58 @@ _OBFUSCATED_EMAIL_RE = re.compile(
     r"([A-Za-z0-9.-]+)\s*(?:\[dot\]|\(dot\)|\{dot\}|\.)\s*([A-Za-z]{2,})",
     re.I,
 )
+
+
+def is_plausible_phone(value: str) -> bool:
+    """Reject education/work year ranges that look like phone-shaped digit runs."""
+    raw = " ".join(str(value or "").split()).strip()
+    if not raw or len(raw) > 24:
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    if _YEAR_RANGE_PHONE_RE.match(raw) or _YEAR_RANGE_PHONE_RE.match(compact):
+        return False
+    tokens = [token for token in re.split(r"[\s\-–—/]+", raw) if token]
+    year_tokens = [token for token in tokens if re.fullmatch(r"(?:19|20)\d{2}", token)]
+    if len(year_tokens) >= 2:
+        leftover_digits = re.sub(r"\D", "", "".join(token for token in tokens if token not in year_tokens))
+        if len(leftover_digits) < 6:
+            return False
+
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) < 10 or len(digits) > 15:
+        return False
+    if digits.startswith("91") and len(digits) >= 12:
+        national = digits[2:]
+        if len(national) == 10 and national[0] in "6789":
+            return True
+    if len(digits) == 11 and digits[0] == "0" and digits[1] in "6789":
+        return True
+    if len(digits) == 10 and digits[0] in "6789":
+        return True
+    if raw.startswith("+") and 10 <= len(digits) <= 15:
+        return True
+    return False
+
+
+def extract_phones_from_text(text: str) -> list[str]:
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _PHONE_RE.finditer(text):
+        candidate = " ".join(match.group(0).split()).strip(" .,;:|/\\")
+        if not is_plausible_phone(candidate):
+            continue
+        key = re.sub(r"\D", "", candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(candidate)
+    return found
+
+
 _EXPERIENCE_HEADING = re.compile(
     r"experience|employment|work history|internship|professional background",
     re.I,
@@ -190,7 +253,7 @@ def _extract_contact_hints(text: str) -> dict:
     emails = extract_emails_from_text(text)
     return {
         "emails": emails,
-        "phones": sorted(set(re.findall(PHONE_REGEX, text))),
+        "phones": extract_phones_from_text(text),
         "links": sorted(set(re.findall(URL_REGEX, text))),
         "name": guess_candidate_name(text),
     }

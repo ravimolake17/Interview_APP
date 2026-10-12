@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import date, datetime, timezone
+from enum import Enum
 from typing import Any, Iterable
 
 from fastapi import Request
@@ -17,9 +19,14 @@ from api.deps import (
     resolve_location_label,
 )
 from core.tenancy import TenantDenied, parse_company_id
+from data.superadmin_table_policy import is_secret_column, sanitize_for_audit
 from models.audit_log import AuditLog
 from models.user import User
 from repositories.audit_log_repository import AuditLogRepository
+
+_SKIP_DIFF_KEYS = frozenset({"created_at", "updated_at", "password_masked", "api_key_masked"})
+_PREVIEW_LIMIT = 160
+_CHANGE_SUMMARY_LIMIT = 8
 
 
 def audit_context_from_request(user: User | None, request: Request | None) -> dict[str, Any]:
@@ -134,6 +141,167 @@ def _message_with_actor(message: str | None, actor_name: str, candidate_name: st
     return message
 
 
+def dump_for_audit(value: Any) -> Any:
+    """JSON-safe snapshot for old_value / new_value."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Enum):
+        return dump_for_audit(value.value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "model_dump"):
+        return dump_for_audit(value.model_dump(mode="json"))
+    if isinstance(value, dict):
+        return {str(key): dump_for_audit(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [dump_for_audit(item) for item in value]
+    return str(value)
+
+
+def _preview(value: Any) -> Any:
+    value = dump_for_audit(value)
+    if isinstance(value, str) and len(value) > _PREVIEW_LIMIT:
+        return value[: _PREVIEW_LIMIT - 1] + "…"
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, default=str, ensure_ascii=False)
+        if len(text) > _PREVIEW_LIMIT:
+            return text[: _PREVIEW_LIMIT - 1] + "…"
+    return value
+
+
+def _field_label(field: str) -> str:
+    return field.replace("_", " ").replace(".", " ").strip()
+
+
+def diff_values(old: Any, new: Any, *, prefix: str = "") -> list[dict[str, Any]]:
+    """Flattened field-level changes between two snapshots."""
+    old = dump_for_audit(old)
+    new = dump_for_audit(new)
+    if old == new:
+        return []
+    if isinstance(old, dict) or isinstance(new, dict):
+        old_map = old if isinstance(old, dict) else {}
+        new_map = new if isinstance(new, dict) else {}
+        changes: list[dict[str, Any]] = []
+        for key in sorted(set(old_map) | set(new_map), key=str):
+            if key in _SKIP_DIFF_KEYS or is_secret_column(str(key)):
+                continue
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in old_map:
+                changes.append({"field": path, "from": None, "to": _preview(new_map[key])})
+            elif key not in new_map:
+                changes.append({"field": path, "from": _preview(old_map[key]), "to": None})
+            else:
+                changes.extend(diff_values(old_map[key], new_map[key], prefix=path))
+        return changes
+    if isinstance(old, list) and isinstance(new, list):
+        return _diff_lists(old, new, prefix)
+    return [{"field": prefix or "value", "from": _preview(old), "to": _preview(new)}]
+
+
+def _diff_lists(old: list[Any], new: list[Any], prefix: str) -> list[dict[str, Any]]:
+    combined = [*old, *new]
+    if combined and all(isinstance(item, dict) for item in combined):
+        id_key = next(
+            (
+                key
+                for key in ("id", "name", "email", "model_id")
+                if all(key in item for item in (*old, *new))
+            ),
+            None,
+        )
+        if id_key:
+            old_map = {str(item[id_key]): item for item in old}
+            new_map = {str(item[id_key]): item for item in new}
+            changes: list[dict[str, Any]] = []
+            for key in sorted(set(old_map) | set(new_map)):
+                path = f"{prefix}[{key}]" if prefix else f"[{key}]"
+                if key not in old_map:
+                    changes.append({"field": path, "from": None, "to": _preview(new_map[key])})
+                elif key not in new_map:
+                    changes.append({"field": path, "from": _preview(old_map[key]), "to": None})
+                else:
+                    changes.extend(diff_values(old_map[key], new_map[key], prefix=path))
+            return changes
+    if old == new:
+        return []
+    return [{"field": prefix or "value", "from": _preview(old), "to": _preview(new)}]
+
+
+def snapshots_from_changes(changes: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not changes:
+        return None, None
+    old_value = {item["field"]: item.get("from") for item in changes}
+    new_value = {item["field"]: item.get("to") for item in changes}
+    return old_value, new_value
+
+
+def summarize_changes(changes: list[dict[str, Any]], *, limit: int = _CHANGE_SUMMARY_LIMIT) -> str:
+    if not changes:
+        return "no field values changed"
+    parts: list[str] = []
+    for item in changes[:limit]:
+        field = _field_label(str(item.get("field") or "value"))
+        parts.append(f"{field}: {item.get('from')!s} → {item.get('to')!s}")
+    extra = len(changes) - limit
+    if extra > 0:
+        parts.append(f"+{extra} more")
+    return "; ".join(parts)
+
+
+def _message_already_specific(message: str) -> bool:
+    lowered = message.casefold()
+    return " → " in message or " from " in lowered or ": " in message
+
+
+def prepare_audit_payload(
+    *,
+    old_value: Any = None,
+    new_value: Any = None,
+    details: dict[str, Any] | None = None,
+    message: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """Sanitize snapshots, keep only changed fields, and attach a readable summary."""
+    old_clean = sanitize_for_audit(dump_for_audit(old_value)) if old_value is not None else None
+    new_clean = sanitize_for_audit(dump_for_audit(new_value)) if new_value is not None else None
+    payload = dict(details or {})
+    changes: list[dict[str, Any]] = []
+    stored_old, stored_new = old_clean, new_clean
+
+    if isinstance(old_clean, dict) and isinstance(new_clean, dict):
+        changes = diff_values(old_clean, new_clean)
+        stored_old, stored_new = snapshots_from_changes(changes)
+        existing = payload.get("changes") if isinstance(payload.get("changes"), list) else []
+        seen = {item.get("field") for item in changes if isinstance(item, dict)}
+        extras = [
+            item
+            for item in existing
+            if not (isinstance(item, dict) and item.get("field") in seen)
+        ]
+        merged = extras + changes
+        if merged:
+            payload["changes"] = merged
+            payload["changed_fields"] = [
+                item.get("field") if isinstance(item, dict) else str(item) for item in merged
+            ]
+        else:
+            payload.setdefault("changes", [])
+            payload.setdefault("changed_fields", [])
+        summary = summarize_changes(changes or [item for item in extras if isinstance(item, dict)])
+        if not message:
+            message = (summary[0].upper() + summary[1:] + ".") if summary else message
+        elif (changes or extras) and not _message_already_specific(message):
+            message = f"{message.rstrip('.')} — {summary}."
+        elif not changes and not extras and not _message_already_specific(message):
+            message = f"{message.rstrip('.')} — no field values changed."
+    elif stored_new is not None and stored_old is None and not message:
+        message = "Created a new record."
+    elif stored_old is not None and stored_new is None and not message:
+        message = "Deleted a record."
+
+    return stored_old, stored_new, payload or None, message
+
+
 class AuditService:
     def __init__(self, db: AsyncSession) -> None:
         self.repo = AuditLogRepository(db)
@@ -180,6 +348,13 @@ class AuditService:
             role = user.role.value if hasattr(user.role, "value") else str(user.role)
         else:
             role = context.get("user_role")
+
+        old_value, new_value, details, message = prepare_audit_payload(
+            old_value=old_value,
+            new_value=new_value,
+            details=details,
+            message=message,
+        )
 
         await self.repo.create(
             action=action,

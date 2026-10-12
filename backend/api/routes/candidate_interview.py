@@ -190,10 +190,13 @@ async def start_room_ai(
     if not is_resume and status != "COMPLETED":
         first_name = (candidate.full_name or "").split()[0] if candidate.full_name else "there"
         company_name = await _company_display_name(db, candidate)
+        from agents.shared.model_catalog import primary_interviewer_name
+
         response.welcome_message = intro_message(
             first_name=first_name,
             company_name=company_name,
             role=candidate.job_position or "",
+            interviewer_name=primary_interviewer_name(),
         )
 
     return response

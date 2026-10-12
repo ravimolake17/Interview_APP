@@ -215,6 +215,12 @@ async def execute_evaluate_job(db: AsyncSession, job: ScreeningJob, payload: Can
 
 async def execute_screening_job(db: AsyncSession, job: ScreeningJob) -> str:
     """Dispatch extract vs scoring work for a claimed screening_jobs row."""
+    try:
+        from services.application_settings_service import ApplicationSettingsService
+
+        await ApplicationSettingsService(db).refresh_ai_runtime_if_stale()
+    except Exception:
+        logger.debug("AI catalog refresh before screening job skipped", exc_info=True)
     raw = json.loads(job.payload_json)
     if _is_extract_payload(raw):
         return await execute_extract_job(db, job, raw)
