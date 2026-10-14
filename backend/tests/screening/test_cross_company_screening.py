@@ -128,6 +128,27 @@ async def test_ensure_skips_when_email_is_missing_or_placeholder():
 
 
 @pytest.mark.asyncio
+async def test_ensure_allows_excluded_candidate_id():
+    """Auto-invite re-saves the same row; that must not look like a duplicate."""
+    existing = MagicMock()
+    existing.company_id = 1
+    existing.candidate_id = "CAND-1"
+    repo = AsyncMock()
+    repo.get_by_email.return_value = existing
+
+    with patch(
+        "services.screening_integration_service.CandidateRepository",
+        return_value=repo,
+    ):
+        await ensure_not_screened_elsewhere(
+            AsyncMock(),
+            emails=["jane@x.com"],
+            company_id=1,
+            exclude_candidate_id="CAND-1",
+        )
+
+
+@pytest.mark.asyncio
 async def test_set_contact_email_rejects_after_invite_sent():
     candidate = MagicMock()
     candidate.email = "jane@x.com"

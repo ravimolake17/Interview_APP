@@ -190,17 +190,17 @@ function faceStatusCopy(action: 'enroll' | 'verify', result: VerificationRespons
   if (action === 'enroll') {
     const accepted = Boolean(result.passed || result.measurements.sample_accepted || result.measurements.enrollment_complete)
     if (result.passed || result.measurements.enrollment_complete) {
-      return { ok: true, title: 'Face captured', detail: 'Please take one more photo to confirm it is you.' }
+      return { ok: true, title: 'Face captured', detail: 'Confirming your identity photo…' }
     }
     if (accepted) {
       return { ok: true, title: 'Photo captured', detail: 'Please capture the next photo.' }
     }
-    return { ok: false, title: 'Face not verified', detail: 'Please capture your photo again in good lighting, looking at the camera.' }
+    return { ok: false, title: 'Capture failed', detail: 'Please recapture your photo in good lighting, looking at the camera.' }
   }
   if (result.passed) {
     return { ok: true, title: 'Face verified', detail: 'Your identity photo has been accepted.' }
   }
-  return { ok: false, title: 'Face not verified', detail: 'Please capture your photo again.' }
+  return { ok: false, title: 'Face not verified', detail: 'Please recapture your photo.' }
 }
 
 function voiceStatusCopy(action: 'enroll' | 'verify', captured: boolean): { ok: boolean; title: string; detail: string } {
@@ -224,7 +224,6 @@ export function CandidatePage() {
   const [consent, setConsent] = useState(false)
   const [credentials, setCredentials] = useState<CandidateSessionCredentials | null>(null)
   const [devices, setDevices] = useState<DeviceState>({ camera: 'pending', microphone: 'pending' })
-  const [mandatoryModelsReady, setMandatoryModelsReady] = useState(false)
   const [biometrics, setBiometrics] = useState<BiometricState>({
     faceEnrolled: false,
     faceVerified: false,
@@ -276,6 +275,7 @@ export function CandidatePage() {
   const [fullscreenLost, setFullscreenLost] = useState(false)
   const [facePhotoUrl, setFacePhotoUrl] = useState<string | null>(null)
   const [faceSampleCount, setFaceSampleCount] = useState(0)
+  const [faceCaptureFailed, setFaceCaptureFailed] = useState(false)
   const [candidateDisplayName, setCandidateDisplayName] = useState('')
   const [candidateJobTitle, setCandidateJobTitle] = useState('')
   const [introPlayed, setIntroPlayed] = useState(false)
@@ -658,7 +658,6 @@ export function CandidatePage() {
     try {
       const state = await requestJson<SessionStateResponse>(`/api/sessions/${saved.sessionId}/state`, {}, saved.token)
       if (state.company_code) setCompanyCode(state.company_code, saved.sessionId)
-      setMandatoryModelsReady(Boolean(state.mandatory_models_ready))
       resumeElapsedRef.current = Math.max(0, Number(state.current_client_elapsed_ms ?? 0))
       setElapsed(formatElapsed(resumeElapsedRef.current))
       setResumeRequired(state.status === 'active' || state.status === 'terminating')
@@ -670,7 +669,7 @@ export function CandidatePage() {
       setDevices({ camera: 'pending', microphone: 'pending' })
       setBiometrics({
         faceEnrolled: state.face_enrolled,
-        faceVerified: false,
+        faceVerified: Boolean(state.initial_face_verified),
         voiceEnrolled: state.voice_enrolled,
         voiceVerified: state.initial_voice_verified,
       })
@@ -788,7 +787,6 @@ export function CandidatePage() {
       const saved = { sessionId: data.session_id, token: data.token }
       credentialsRef.current = saved
       setCredentials(saved)
-      setMandatoryModelsReady(Boolean(data.mandatory_models_ready))
       sessionStorage.setItem('agent5-session', JSON.stringify(saved))
       setPhase('devices')
       setStep(1)
@@ -900,6 +898,10 @@ export function CandidatePage() {
       const count = Number(result.measurements.sample_count ?? 0)
       setFaceSampleCount(count)
       const enrollmentComplete = Boolean(result.passed || result.measurements.enrollment_complete)
+      const sampleFailed = action === 'enroll'
+        ? !Boolean(result.passed || result.measurements.sample_accepted || result.measurements.enrollment_complete)
+        : !result.passed
+      setFaceCaptureFailed(sampleFailed)
       setBiometrics((current) => ({
         ...current,
         faceEnrolled: action === 'enroll' ? enrollmentComplete : current.faceEnrolled,
@@ -911,11 +913,21 @@ export function CandidatePage() {
           `${copy.title}. ${copy.detail}`,
           copy.ok ? 'success' : 'error',
         )
+        // After enrollment finishes, confirm identity automatically — no second click.
+        if (enrollmentComplete) {
+          window.setTimeout(() => {
+            if (phaseRef.current === 'enrollment' && !leavingInterviewRef.current) {
+              void handleFace('verify')
+            }
+          }, 500)
+        }
         return
       }
       const copy = faceStatusCopy(action, result)
+      if (result.passed) setFaceCaptureFailed(false)
       showMessage(`${copy.title}. ${copy.detail}`, copy.ok ? 'success' : 'error')
     } catch (error) {
+      setFaceCaptureFailed(true)
       showMessage(errorMessage(error), 'error')
     } finally {
       setBusy('')
@@ -2503,7 +2515,11 @@ export function CandidatePage() {
     })
   }, [])
 
-  const canStart = useMemo(() => Object.values(biometrics).every(Boolean) && devices.camera === 'ready' && devices.microphone === 'ready' && mandatoryModelsReady, [biometrics, devices, mandatoryModelsReady])
+  // Identity + devices unlock Start. AI model readiness is best-effort (do not grey the button after face/voice pass).
+  const canStart = useMemo(
+    () => Object.values(biometrics).every(Boolean) && devices.camera === 'ready' && devices.microphone === 'ready',
+    [biometrics, devices],
+  )
 
   const startBlockers = useMemo(() => {
     const missing: string[] = []
@@ -2511,9 +2527,8 @@ export function CandidatePage() {
     if (!biometrics.voiceEnrolled) missing.push('voice enrollment')
     else if (!biometrics.voiceVerified) missing.push('voice identity confirmation — speak the sentence once more')
     if (devices.camera !== 'ready' || devices.microphone !== 'ready') missing.push('camera and microphone checks')
-    if (!mandatoryModelsReady) missing.push('required AI models')
     return missing
-  }, [biometrics, devices, mandatoryModelsReady])
+  }, [biometrics, devices])
 
   const confirmLeaveInterview = useCallback(async () => {
     const current = credentialsRef.current
@@ -2697,40 +2712,30 @@ export function CandidatePage() {
                 </aside>
               )}
               <div className="viewfinder-actions" role="group" aria-label="Face photo controls">
-                <button
-                  id={biometrics.faceEnrolled ? 'faceVerify' : 'faceEnroll'}
-                  type="button"
-                  className="viewfinder-btn capture"
-                  onClick={() => void handleFace(biometrics.faceEnrolled ? 'verify' : 'enroll')}
-                  disabled={Boolean(busy) || biometrics.faceVerified}
-                  aria-label={biometrics.faceEnrolled ? 'Capture verification photo' : 'Capture face photo'}
-                >
-                  <svg className="viewfinder-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                    <path fill="currentColor" d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9Zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2.2A2.8 2.8 0 1 0 12 10.2a2.8 2.8 0 0 0 0 5.6Z" />
-                  </svg>
-                  <span>
-                    {biometrics.faceVerified
-                      ? 'Verified'
-                      : biometrics.faceEnrolled
-                        ? 'Capture'
-                        : `Capture${faceSampleCount > 0 ? ` (${faceSampleCount}/3)` : ''}`}
-                  </span>
-                </button>
-                <button
-                  id="faceRecapture"
-                  type="button"
-                  className="viewfinder-btn recapture"
-                  onClick={() => void handleFace(biometrics.faceEnrolled ? 'verify' : 'enroll')}
-                  disabled={Boolean(busy) || biometrics.faceVerified || (!facePhotoUrl && faceSampleCount < 1)}
-                  aria-label="Recapture face photo"
-                >
-                  Recapture
-                </button>
+                {!biometrics.faceVerified && (
+                  <button
+                    id={faceCaptureFailed ? 'faceRecapture' : (biometrics.faceEnrolled ? 'faceVerify' : 'faceEnroll')}
+                    type="button"
+                    className={`viewfinder-btn ${faceCaptureFailed ? 'recapture' : 'capture'}`}
+                    onClick={() => void handleFace(biometrics.faceEnrolled ? 'verify' : 'enroll')}
+                    disabled={Boolean(busy)}
+                    aria-label={faceCaptureFailed ? 'Recapture face photo' : 'Capture face photo'}
+                  >
+                    <svg className="viewfinder-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path fill="currentColor" d="M9 3 7.17 5H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.17L15 3H9Zm3 15a5 5 0 1 1 0-10 5 5 0 0 1 0 10Zm0-2.2A2.8 2.8 0 1 0 12 10.2a2.8 2.8 0 0 0 0 5.6Z" />
+                    </svg>
+                    <span>
+                      {faceCaptureFailed
+                        ? 'Recapture'
+                        : `Capture${faceSampleCount > 0 && !biometrics.faceEnrolled ? ` (${faceSampleCount}/3)` : ''}`}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
             <div className="grid two enrollment-grid">
               <article className="subcard">
-                <div className="subcard-heading"><span className="feature-icon">F</span><div><h3>Face photo</h3><p>Look at the camera and use Capture or Recapture on the viewfinder. Your latest photo appears as a circle in the top-right corner.</p></div></div>
+                <div className="subcard-heading"><span className="feature-icon">F</span><div><h3>Face photo</h3><p>Look at the camera and capture your photo. If capture fails, the button becomes Recapture. Once verified, you will not be asked again.</p></div></div>
                 <div className="status-row">
                   <StatusPill label={biometrics.faceEnrolled ? 'Captured' : 'Not captured'} state={biometrics.faceEnrolled ? 'ok' : 'neutral'} />
                   <StatusPill label={biometrics.faceVerified ? 'Face verified' : 'Not verified'} state={biometrics.faceVerified ? 'ok' : 'neutral'} />
@@ -2770,13 +2775,27 @@ export function CandidatePage() {
                   <StatusPill label={biometrics.voiceVerified ? 'Voice verified' : 'Not verified'} state={biometrics.voiceVerified ? 'ok' : 'neutral'} />
                 </div>
                 <div className="controls">
-                  <button id="changeVoiceSentence" type="button" className="secondary" onClick={() => void loadVoiceSentence(true)} disabled={Boolean(busy) || voiceRecording || biometrics.voiceEnrolled}>Change sentence</button>
-                  {biometrics.voiceEnrolled ? (
-                    <button id="voiceVerify" type="button" onClick={() => void handleVoice('verify')} disabled={Boolean(busy) || !voiceSentence}>
-                      {biometrics.voiceVerified ? 'Re-verify speaker' : 'Confirm it is you'}
+                  {!biometrics.voiceVerified && (
+                    <button
+                      id="changeVoiceSentence"
+                      type="button"
+                      className="secondary"
+                      onClick={() => void loadVoiceSentence(true)}
+                      disabled={Boolean(busy) || voiceRecording || biometrics.voiceEnrolled}
+                    >
+                      Change sentence
                     </button>
-                  ) : (
-                    <button id="voiceEnroll" type="button" onClick={() => void handleVoice('enroll')} disabled={Boolean(busy) || !voiceSentence}>Enroll your voice</button>
+                  )}
+                  {!biometrics.voiceVerified && (
+                    biometrics.voiceEnrolled ? (
+                      <button id="voiceVerify" type="button" onClick={() => void handleVoice('verify')} disabled={Boolean(busy) || !voiceSentence}>
+                        Confirm it is you
+                      </button>
+                    ) : (
+                      <button id="voiceEnroll" type="button" onClick={() => void handleVoice('enroll')} disabled={Boolean(busy) || !voiceSentence}>
+                        Enroll your voice
+                      </button>
+                    )
                   )}
                 </div>
                 <div id="voiceResult">{voiceResult && (() => {
@@ -2796,12 +2815,12 @@ export function CandidatePage() {
                 <strong>{canStart ? 'Ready to enter the interview' : 'Finish identity checks'}</strong>
                 <p>
                   {canStart
-                    ? 'Click the button below. Chrome will hide tabs, the address bar, and window controls for this interview. Press Esc only if you must leave fullscreen.'
+                    ? 'Face and voice are verified. Click Start interview to begin.'
                     : `Start stays locked until you finish ${startBlockers.join(', ')}.`}
                 </p>
               </div>
               <button id="startButton" type="button" onClick={() => void startInterview()} disabled={Boolean(busy) || !canStart}>
-                {resumeRequired ? 'Open interview in fullscreen' : 'Start AI interview in fullscreen'}
+                {resumeRequired ? 'Open interview' : 'Start interview'}
               </button>
             </div>
           </section>
@@ -2971,7 +2990,7 @@ export function CandidatePage() {
                       </div>
                       {!aiInterviewStarted && candidatePresent && (
                         <button type="button" className="meet-control-btn primary meet-text-btn" disabled={Boolean(busy)} onClick={() => void startInterview()}>
-                          <PlayIcon width={18} height={18} /> Start AI interview now
+                          <PlayIcon width={18} height={18} /> Start interview
                         </button>
                       )}
                       {interviewStage === 'mcq' && mcq ? (

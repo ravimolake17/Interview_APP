@@ -92,11 +92,15 @@ async def ensure_not_screened_elsewhere(
     *,
     emails: list[str] | tuple[str, ...] | None,
     company_id: int,
+    exclude_candidate_id: str | None = None,
 ) -> None:
     """Block screening when this email already exists at any company.
 
     Identity is email, not name. Call this on Docling text *before* LLM
     resume parse so duplicate uploads do not spend tokens.
+
+    ``exclude_candidate_id`` allows the same row to be updated again inside
+    one screening job (save → auto-invite) without treating it as a duplicate.
     """
     normalized = normalize_candidate_emails(*(emails or []))
     if not normalized:
@@ -104,9 +108,12 @@ async def ensure_not_screened_elsewhere(
 
     repo = CandidateRepository(db)
     companies = CompanyRepository(db)
+    exclude = (exclude_candidate_id or "").strip()
     for email in normalized:
         existing = await repo.get_by_email(email)
         if existing is None:
+            continue
+        if exclude and existing.candidate_id == exclude:
             continue
         company = (
             await companies.get_by_id(existing.company_id)
@@ -414,6 +421,8 @@ async def save_screening_evaluation(
         db,
         emails=_extract_emails(evaluation),
         company_id=company_id,
+        # Same screening run: first save creates the row, auto-invite saves again.
+        exclude_candidate_id=existing.candidate_id if existing else None,
     )
 
     email, persist_warning = _resolve_contact_email(evaluation, existing)
@@ -571,6 +580,7 @@ async def set_candidate_contact_email(
         db,
         emails=[normalized],
         company_id=candidate.company_id,
+        exclude_candidate_id=candidate.candidate_id,
     )
     duplicates = await repo.list_by_email(normalized)
     if any(other.candidate_id != candidate.candidate_id for other in duplicates):
