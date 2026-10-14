@@ -31,11 +31,19 @@ def parse_jd(payload: JDParseRequest) -> ParsedJD:
 
 
 @router.post("/upload", response_model=JDUploadResponse)
-async def upload_jd(file: UploadFile = File(...)) -> JDUploadResponse:
+async def upload_jd(
+    file: UploadFile = File(...),
+    fast: bool = False,
+) -> JDUploadResponse:
+    """Upload a JD file.
+
+    ``fast=true`` skips the LLM parse (rules only) so a new screening batch can
+    be queued while Groq is busy with other resumes.
+    """
     try:
         extracted = await ingest_document(file, "jds")
         parsed_jd = _with_jd_content_title(
-            parse_job_description(extracted["text"]),
+            parse_job_description(extracted["text"], use_llm=not fast),
             extracted["text"],
         )
         return JDUploadResponse(

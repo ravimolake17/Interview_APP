@@ -5,6 +5,7 @@ import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import ToastContainer from '../ui/ToastContainer';
 import LoadingSpinner from '../LoadingSpinner';
+import ScreeningQueuePanel from '../screening/ScreeningQueuePanel';
 import { useApp } from '../../context/AppContext';
 
 export default function Layout() {
@@ -58,6 +59,7 @@ export default function Layout() {
           </motion.main>
         </AnimatePresence>
       </div>
+      <ScreeningQueuePanel />
       <ToastContainer />
     </div>
   );

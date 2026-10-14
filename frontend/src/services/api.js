@@ -349,7 +349,7 @@ export const checkJobDuplicate = ({ title, jdFileUrl } = {}) =>
       ...(jdFileUrl ? { jd_file_url: jdFileUrl } : {}),
     },
   });
-export const createJob = (payload) => api.post('/jobs', payload);
+export const createJob = (payload, config = {}) => api.post('/jobs', payload, config);
 export const updateJob = (jobId, payload) => api.patch(`/jobs/${jobId}`, payload);
 export const deleteJob = (jobId) => api.delete(`/jobs/${jobId}`);
 

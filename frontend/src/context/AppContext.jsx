@@ -32,6 +32,7 @@ import {
   loadAppearanceSettings,
   saveAppearanceSettings,
 } from '../utils/theme';
+import { formatApiError, NO_NETWORK_MESSAGE } from '../utils/apiError';
 import {
   buildNotifications,
   filterDismissedNotifications,
@@ -390,9 +391,10 @@ export function AppProvider({ children }) {
       hasLoadedRef.current = true;
     } catch (error) {
       if (generation !== refreshGenerationRef.current) return;
-      setDataError(error.response?.data?.detail || 'Failed to load dashboard data.');
+      const message = formatApiError(error, 'Failed to load dashboard data.');
+      setDataError(message);
       if (!silent) {
-        addToast('Could not load data from backend.', 'error');
+        addToast(message, 'error');
       }
     } finally {
       if (generation === refreshGenerationRef.current && showSpinner) {
@@ -404,6 +406,24 @@ export function AppProvider({ children }) {
   useEffect(() => {
     refreshData();
   }, [refreshData]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    const onOffline = () => setDataError(NO_NETWORK_MESSAGE);
+    const onOnline = () => {
+      setDataError(null);
+      refreshData({ silent: true });
+    };
+    window.addEventListener('offline', onOffline);
+    window.addEventListener('online', onOnline);
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setDataError(NO_NETWORK_MESSAGE);
+    }
+    return () => {
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [isAuthenticated, refreshData]);
 
   useAutoRefresh(
     () => refreshData({ silent: true }),

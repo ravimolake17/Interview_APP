@@ -62,6 +62,7 @@ import {
   getInterviewAvailability,
 } from '../../services/api';
 import { mapCandidateFromBackend } from '../../utils/hrMappers';
+import { formatApiError } from '../../utils/apiError';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { isSuperAdmin } from '../../utils/roles';
@@ -101,19 +102,6 @@ function formatTimeLabel(value) {
   return `${hour12}:${minutes} ${suffix}`;
 }
 
-function formatApiError(err, fallback) {
-  const detail = err?.response?.data?.detail;
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  if (detail && typeof detail === 'object') {
-    if (typeof detail.message === 'string') return detail.message;
-    try {
-      return JSON.stringify(detail);
-    } catch {
-      return fallback;
-    }
-  }
-  return err?.message || fallback;
-}
 
 function agent5CardStatus(agent5, joinLink, loading) {
   if (loading) return { label: 'Loading', tone: 'pending' };

@@ -5,6 +5,7 @@ import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
 import { AuthProvider } from './context/AuthContext';
 import { AppProvider } from './context/AppContext';
+import { ScreeningQueueProvider } from './context/ScreeningQueueContext';
 import CompanyTabBrand from './components/CompanyTabBrand';
 import { applyCompanyTabBrand } from './utils/companyBranding';
 import { applyAppearance, loadAppearanceSettings } from './utils/theme';
@@ -19,8 +20,10 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       <BrowserRouter>
         <AuthProvider>
           <AppProvider>
-            <CompanyTabBrand />
-            <App />
+            <ScreeningQueueProvider>
+              <CompanyTabBrand />
+              <App />
+            </ScreeningQueueProvider>
           </AppProvider>
         </AuthProvider>
       </BrowserRouter>

@@ -54,16 +54,26 @@ export async function enqueueResumeExtract(file, jdPayload, jdText, options = {}
   }
 }
 
-export async function uploadJobDescription(file) {
+export async function uploadJobDescription(file, { fast = false } = {}) {
   const form = new FormData();
   form.append('file', file);
   try {
     const { data } = await screeningClient.post('/api/jd/upload', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      params: fast ? { fast: true } : undefined,
+      // Docling + optional LLM can exceed the default API 30s while other
+      // screening jobs are already using Groq.
+      timeout: fast ? 3 * 60 * 1000 : 10 * 60 * 1000,
     });
     return data;
   } catch (error) {
-    throw new Error(await readError(error));
+    const message = await readError(error);
+    if (String(error?.code || '') === 'ECONNABORTED' || /timeout/i.test(String(message))) {
+      throw new Error(
+        'JD upload timed out because the server is busy screening other resumes. Wait a moment and try again.',
+      );
+    }
+    throw new Error(message);
   }
 }
 

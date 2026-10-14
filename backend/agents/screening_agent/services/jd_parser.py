@@ -1011,6 +1011,8 @@ def _merge_llm_result(
 
 def parse_job_description(
     jd_text: str,
+    *,
+    use_llm: bool = True,
 ) -> ParsedJD:
     text = _prepare_jd_text(jd_text.strip())
 
@@ -1023,6 +1025,11 @@ def parse_job_description(
         raise ValueError("JD text cannot be empty.")
 
     base = _rule_based_parse(text)
+
+    # Fast path for queueing while other Groq jobs are running — avoid waiting
+    # on rate limits just to add another screening batch.
+    if not use_llm:
+        return base
 
     llm = _parse_with_llm(text)
 

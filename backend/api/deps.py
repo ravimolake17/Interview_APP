@@ -85,11 +85,24 @@ async def get_optional_user(
 
 
 def get_client_ip(request: Request) -> str | None:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
+    from services.ip_location import normalize_client_ip
+
+    # Prefer gateway / proxy headers (Azure AGW may send ip:port).
+    for header in (
+        "x-azure-clientip",
+        "x-forwarded-for",
+        "x-real-ip",
+        "cf-connecting-ip",
+    ):
+        raw = request.headers.get(header)
+        if not raw:
+            continue
+        candidate = raw.split(",")[0].strip()
+        normalized = normalize_client_ip(candidate)
+        if normalized:
+            return normalized
+    if request.client and request.client.host:
+        return normalize_client_ip(request.client.host)
     return None
 
 
@@ -122,20 +135,7 @@ def get_session_id(request: Request) -> str | None:
 
 
 def resolve_location_label(ip_address: str | None) -> str | None:
-    """Best-effort coarse location label without external geo lookups."""
-    if not ip_address:
-        return None
-    if ip_address in {"127.0.0.1", "::1"} or ip_address.startswith("127."):
-        return "Localhost"
-    if (
-        ip_address.startswith("10.")
-        or ip_address.startswith("192.168.")
-        or ip_address.startswith("172.16.")
-        or ip_address.startswith("172.17.")
-        or ip_address.startswith("172.18.")
-        or ip_address.startswith("172.19.")
-        or ip_address.startswith("172.2")
-        or ip_address.startswith("172.3")
-    ):
-        return "Private network"
-    return None
+    """Coarse city/region label for audit logs (private + public geo lookup)."""
+    from services.ip_location import resolve_location_label as _resolve
+
+    return _resolve(ip_address)
