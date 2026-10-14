@@ -21,6 +21,7 @@ from agents.screening_agent.graph import run_screening_graph
 from agents.screening_agent.services.ai_parser import extract_resume_data
 from agents.screening_agent.services.docling_extractor import extract_text_from_docx, extract_text_from_pdf
 from agents.screening_agent.services.document_ingestion import get_uploads_root
+from agents.screening_agent.services.resume_parser import extract_emails_from_text
 from services.screening_integration_service import (
     ensure_not_screened_elsewhere,
     emails_from_parsed_resume,
@@ -56,7 +57,7 @@ def _is_extract_payload(payload: object) -> bool:
 
 
 async def execute_extract_job(db: AsyncSession, job: ScreeningJob, payload: dict) -> str:
-    """Docling + Groq parse, then enqueue the existing scoring job."""
+    """Docling text → email duplicate check → Groq parse → enqueue scoring."""
     from agents.screening_agent.services.screening_queue_service import ScreeningQueueService
 
     relative = str(payload.get("stored_relative_path") or "").strip()
@@ -75,12 +76,22 @@ async def execute_extract_job(db: AsyncSession, job: ScreeningJob, payload: dict
         if not text:
             raise ValueError("No readable text found in the file.")
 
+        company_id = payload.get("company_id") or job.company_id
+        # Cheap email check before LLM structured parse (saves Groq/Azure tokens).
+        if company_id:
+            early_emails = extract_emails_from_text(text)
+            await ensure_not_screened_elsewhere(
+                db,
+                emails=early_emails,
+                company_id=int(company_id),
+            )
+
         parsed = await asyncio.to_thread(extract_resume_data, text)
         parsed["extraction_warning"] = _merge_warnings(
             extracted.get("extraction_warning"),
             parsed.get("extraction_warning"),
         )
-        company_id = payload.get("company_id") or job.company_id
+        # Second pass: emails only found after structured parse (rare).
         if company_id:
             await ensure_not_screened_elsewhere(
                 db,

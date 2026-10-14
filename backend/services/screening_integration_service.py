@@ -35,20 +35,33 @@ PLACEHOLDER_EMAIL_DOMAIN = "@screening.local"
 
 
 class CandidateAlreadyScreenedElsewhereError(ValueError):
-    """Raised when the same person (matched by email) already belongs to another company."""
+    """Raised when the same person (matched by email) was already screened anywhere."""
 
-    def __init__(self, email: str, company_name: str | None = None) -> None:
+    def __init__(
+        self,
+        email: str,
+        company_name: str | None = None,
+        *,
+        same_company: bool = False,
+    ) -> None:
         self.email = email
         self.company_name = company_name
-        if company_name:
+        self.same_company = same_company
+        where = f" at {company_name}" if company_name else ""
+        if same_company:
+            message = (
+                f"This candidate ({email}) has already been screened{where}. "
+                "Re-screening the same resume is not allowed."
+            )
+        elif company_name:
             message = (
                 f"This candidate ({email}) has already been screened at {company_name}. "
-                "The same person cannot be screened at another company."
+                "The same person cannot be screened again at another company."
             )
         else:
             message = (
-                f"This candidate ({email}) has already been screened at another company. "
-                "The same person cannot be screened twice across companies."
+                f"This candidate ({email}) has already been screened. "
+                "The same person cannot be screened again."
             )
         super().__init__(message)
 
@@ -80,26 +93,30 @@ async def ensure_not_screened_elsewhere(
     emails: list[str] | tuple[str, ...] | None,
     company_id: int,
 ) -> None:
-    """Block screening when this email already exists only at a different company.
+    """Block screening when this email already exists at any company.
 
-    Identity is email, not name. Same-company re-screens remain allowed.
+    Identity is email, not name. Call this on Docling text *before* LLM
+    resume parse so duplicate uploads do not spend tokens.
     """
     normalized = normalize_candidate_emails(*(emails or []))
     if not normalized:
         return
 
     repo = CandidateRepository(db)
+    companies = CompanyRepository(db)
     for email in normalized:
-        if await repo.list_by_email(email, company_id=company_id):
-            return
-
-    for email in normalized:
-        other = await repo.get_by_email_outside_company(email, company_id)
-        if other is None:
+        existing = await repo.get_by_email(email)
+        if existing is None:
             continue
-        company = await CompanyRepository(db).get_by_id(other.company_id)
+        company = (
+            await companies.get_by_id(existing.company_id)
+            if existing.company_id
+            else None
+        )
         raise CandidateAlreadyScreenedElsewhereError(
-            email, company.name if company else None
+            email,
+            company.name if company else None,
+            same_company=existing.company_id == company_id,
         )
 
 

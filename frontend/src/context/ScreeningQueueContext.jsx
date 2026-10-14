@@ -288,26 +288,62 @@ export function ScreeningQueueProvider({ children }) {
           mapEvaluationToScreeningResult(result, extraction, index),
         );
 
-        // Success — files no longer needed.
-        clearJobFiles(job.id);
+        const failures = batch.failures || [];
+        const alreadyScreened = failures.filter((item) =>
+          /already been screened/i.test(String(item.message || '')),
+        );
+        const allBlocked =
+          !mapped.length && failures.length > 0 && alreadyScreened.length === failures.length;
+
+        // Success path clears files; all-blocked stays failed so Retry is not tempting
+        // (re-upload of same person will fail again until candidate is deleted).
+        if (!allBlocked) {
+          clearJobFiles(job.id);
+        }
+
         updateJob(job.id, {
-          status: 'completed',
-          progress: `Done · ${mapped.length} candidate(s)`,
+          status: allBlocked ? 'failed' : 'completed',
+          progress: allBlocked
+            ? 'Already screened — blocked'
+            : `Done · ${mapped.length} candidate(s)`,
           results: mapped,
-          failures: batch.failures || [],
-          hasLocalFiles: false,
+          failures,
+          error: allBlocked
+            ? alreadyScreened.map((item) => item.message).join(' ')
+            : null,
+          hasLocalFiles: allBlocked ? hasJobFiles(job.id) : false,
           preparedJd,
         });
-        setScreeningResults(mapped);
-        await refreshData({ silent: true, force: true });
+        if (mapped.length) {
+          setScreeningResults(mapped);
+          await refreshData({ silent: true, force: true });
+        }
 
-        if (batch.failures?.length) {
-          addToast(
-            mapped.length
-              ? `${job.label}: screened ${mapped.length} of ${job.resumeCount}. Some resumes failed.`
-              : `${job.label}: screening finished with errors.`,
-            'error',
-          );
+        if (failures.length) {
+          if (alreadyScreened.length && !mapped.length) {
+            addToast(
+              alreadyScreened
+                .map((item) => `${item.name}: ${item.message}`)
+                .join('\n'),
+              'error',
+            );
+          } else if (alreadyScreened.length) {
+            addToast(
+              `${job.label}: screened ${mapped.length} of ${job.resumeCount}. ` +
+                alreadyScreened
+                  .map((item) => `${item.name} already screened`)
+                  .join('; ') +
+                '.',
+              'error',
+            );
+          } else {
+            addToast(
+              mapped.length
+                ? `${job.label}: screened ${mapped.length} of ${job.resumeCount}. Some resumes failed.`
+                : `${job.label}: screening finished with errors.`,
+              'error',
+            );
+          }
         } else {
           addToast(
             `${job.label}: screening complete — ${mapped.length} candidate(s) saved.`,

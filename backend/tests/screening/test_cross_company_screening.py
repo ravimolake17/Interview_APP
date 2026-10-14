@@ -1,4 +1,4 @@
-"""Candidates are identified by email and cannot be screened at a second company."""
+"""Candidates are identified by email and cannot be screened again at any company."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_error_message_includes_email_and_company():
     err = CandidateAlreadyScreenedElsewhereError("jane@x.com", "RR Parkon")
     assert "jane@x.com" in str(err)
     assert "RR Parkon" in str(err)
-    assert "cannot be screened at another company" in str(err)
+    assert "cannot be screened again at another company" in str(err)
 
 
 def test_emails_from_parsed_resume_reads_section_text():
@@ -55,19 +55,33 @@ def test_emails_from_parsed_resume_reads_section_text():
 
 
 @pytest.mark.asyncio
-async def test_ensure_allows_same_company_rescreen():
+async def test_ensure_blocks_same_company_rescreen():
+    existing = MagicMock()
+    existing.company_id = 1
+    company = MagicMock()
+    company.name = "RR Parkon"
     repo = AsyncMock()
-    repo.list_by_email.return_value = [MagicMock()]
+    repo.get_by_email.return_value = existing
+    companies = AsyncMock()
+    companies.get_by_id.return_value = company
 
-    with patch(
-        "services.screening_integration_service.CandidateRepository",
-        return_value=repo,
+    with (
+        patch(
+            "services.screening_integration_service.CandidateRepository",
+            return_value=repo,
+        ),
+        patch(
+            "services.screening_integration_service.CompanyRepository",
+            return_value=companies,
+        ),
     ):
-        await ensure_not_screened_elsewhere(
-            AsyncMock(), emails=["jane@x.com"], company_id=1
-        )
-
-    repo.get_by_email_outside_company.assert_not_called()
+        with pytest.raises(
+            CandidateAlreadyScreenedElsewhereError,
+            match="already been screened at RR Parkon",
+        ):
+            await ensure_not_screened_elsewhere(
+                AsyncMock(), emails=["jane@x.com"], company_id=1
+            )
 
 
 @pytest.mark.asyncio
@@ -77,8 +91,7 @@ async def test_ensure_blocks_other_company():
     company = MagicMock()
     company.name = "RR Parkon"
     repo = AsyncMock()
-    repo.list_by_email.return_value = []
-    repo.get_by_email_outside_company.return_value = other
+    repo.get_by_email.return_value = other
     companies = AsyncMock()
     companies.get_by_id.return_value = company
 
@@ -111,8 +124,7 @@ async def test_ensure_skips_when_email_is_missing_or_placeholder():
             emails=["no-email-ab@screening.local"],
             company_id=1,
         )
-    repo.list_by_email.assert_not_called()
-    repo.get_by_email_outside_company.assert_not_called()
+    repo.get_by_email.assert_not_called()
 
 
 @pytest.mark.asyncio

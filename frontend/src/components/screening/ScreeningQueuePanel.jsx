@@ -145,11 +145,20 @@ function ResultsPreviewModal({ job, onClose, onRetry, canRetry }) {
           )}
           {job.failures?.length > 0 && (
             <div className="card p-4 border-amber-200 dark:border-amber-900/40 bg-amber-50/70 dark:bg-amber-900/10">
-              <p className="text-sm font-semibold text-col mb-2">Partial failures</p>
-              <ul className="space-y-1 text-sm text-muted">
+              <p className="text-sm font-semibold text-col mb-2">
+                {job.failures.every((item) =>
+                  /already been screened/i.test(String(item.message || '')),
+                )
+                  ? 'Already screened'
+                  : 'Partial failures'}
+              </p>
+              <ul className="space-y-2 text-sm text-muted">
                 {job.failures.map((item) => (
                   <li key={`${item.name}-${item.message}`}>
-                    <span className="font-medium text-col">{item.name}</span>: {item.message}
+                    <span className="font-medium text-col">{item.name}</span>
+                    <span className="block mt-0.5 text-red-600 dark:text-red-400">
+                      {item.message}
+                    </span>
                   </li>
                 ))}
               </ul>
