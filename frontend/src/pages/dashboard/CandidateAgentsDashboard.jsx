@@ -137,6 +137,21 @@ function toInterviewerJoinLink(joinLink) {
   }
 }
 
+/** Full Agent5 review UI lives on the Proctor host, not on intapp. */
+function toProctorMonitorUrl(joinLink, sessionId) {
+  let origin = 'https://proctor.rrglobal.com';
+  try {
+    if (joinLink) origin = new URL(joinLink, window.location.origin).origin;
+  } catch {
+    /* keep default */
+  }
+  const url = new URL('/monitor/', origin);
+  if (sessionId) url.searchParams.set('session_id', sessionId);
+  const token = localStorage.getItem('hr_access_token');
+  if (token) url.searchParams.set('hr_token', token);
+  return url.toString();
+}
+
 function answerKindLabel(kind) {
   if (kind === 'mcq') return 'MCQ';
   if (kind === 'followup') return 'Oral follow-up';
@@ -2668,7 +2683,9 @@ export default function CandidateAgentsDashboard() {
               <p className="text-xs text-muted">No fraud events were recorded for this session.</p>
             )}
             <a
-              href="/monitor/"
+              href={toProctorMonitorUrl(candidate?.joinLink, agent5?.agent5_session_id)}
+              target="_blank"
+              rel="noreferrer"
               className="btn-secondary inline-flex items-center gap-2 px-3 py-2 text-sm"
             >
               <ExternalLink size={14} />

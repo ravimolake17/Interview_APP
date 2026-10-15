@@ -156,13 +156,36 @@ export default function Dashboard() {
           </div>
           <button type="button" onClick={() => navigate('/jobs')} className="text-xs text-blue-500 hover:text-blue-600 font-medium">View all jobs →</button>
         </div>
-        <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={applicationsPerJob} barSize={40}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
-            <XAxis dataKey="name" tick={{ fill: 'var(--color-text-muted)', fontSize: 12 }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fill: 'var(--color-text-muted)', fontSize: 12 }} axisLine={false} tickLine={false} />
+        <ResponsiveContainer width="100%" height={Math.max(220, applicationsPerJob.length * 48)}>
+          <BarChart
+            layout="vertical"
+            data={applicationsPerJob}
+            barSize={22}
+            margin={{ top: 4, right: 24, left: 8, bottom: 4 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" horizontal={false} />
+            <XAxis
+              type="number"
+              allowDecimals={false}
+              tick={{ fill: 'var(--color-text-muted)', fontSize: 12 }}
+              axisLine={false}
+              tickLine={false}
+            />
+            <YAxis
+              type="category"
+              dataKey="name"
+              width={168}
+              interval={0}
+              tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }}
+              tickFormatter={(value) => {
+                const label = String(value || '');
+                return label.length > 26 ? `${label.slice(0, 24)}…` : label;
+              }}
+              axisLine={false}
+              tickLine={false}
+            />
             <Tooltip content={<CustomTooltip />} />
-            <Bar dataKey="applicants" name="Applicants" fill="#2563EB" radius={[6, 6, 0, 0]} />
+            <Bar dataKey="applicants" name="Applicants" fill="#2563EB" radius={[0, 6, 6, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </motion.div>

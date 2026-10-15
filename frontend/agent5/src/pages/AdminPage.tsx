@@ -61,12 +61,19 @@ export function AdminPage() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [riskFilter, setRiskFilter] = useState('')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('session_id')
+    } catch {
+      return null
+    }
+  })
   const [detail, setDetail] = useState<AdminSessionDetail | null>(null)
   const [reviewDecision, setReviewDecision] = useState('needs_more_review')
   const [reviewNotes, setReviewNotes] = useState('')
   const [reportLinks, setReportLinks] = useState<{ json: string; html: string; pdf: string; checksums: ReportRegenerateResponse['checksums'] } | null>(null)
   const debounceRef = useRef<number | null>(null)
+  const bootstrappedSessionRef = useRef(false)
 
   useEffect(() => { tokenRef.current = token }, [token])
 
@@ -101,7 +108,8 @@ export function AdminPage() {
       if (error instanceof ApiError && error.status === 401) {
         localStorage.removeItem('hr_access_token')
         setToken('')
-        window.location.href = '/login'
+        const appLogin = `${window.location.protocol}//${window.location.hostname.replace(/^proctor\./, 'intapp.')}/login`
+        window.location.href = appLogin
       }
       showMessage(errorMessage(error), 'error')
     } finally {
@@ -124,6 +132,12 @@ export function AdminPage() {
       setBusy('')
     }
   }, [api, refreshMediaToken, showMessage])
+
+  useEffect(() => {
+    if (!token || !selectedId || bootstrappedSessionRef.current) return
+    bootstrappedSessionRef.current = true
+    void loadDetail(selectedId)
+  }, [token, selectedId, loadDetail])
 
   const logout = () => {
     localStorage.removeItem('hr_access_token')

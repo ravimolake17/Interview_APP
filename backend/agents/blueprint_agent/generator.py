@@ -130,6 +130,78 @@ def _clean_text(value: Any) -> str:
     return " ".join(str(value or "").replace("\u00a0", " ").split()).strip()
 
 
+# Profile/objective blurbs must never become {signal}/{skill} in Agent 4 templates.
+_RESUME_SUMMARY_MARKERS = re.compile(
+    r"\b("
+    r"motivated|passionate|dedicated|aspiring|results[ -]?driven|"
+    r"research[ -]?oriented|detail[ -]?oriented|self[ -]?motivated|"
+    r"seeking|looking for|career objective|professional summary|"
+    r"summary|objective|about me|"
+    r"with strong (expertise|knowledge|background|skills)|"
+    r"graduate with|fresher with|years of experience in"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_MAX_TOPIC_WORDS = 8
+_MAX_TOPIC_CHARS = 64
+
+
+def _looks_like_resume_summary(text: str) -> bool:
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return True
+    words = cleaned.split()
+    if len(words) > _MAX_TOPIC_WORDS or len(cleaned) > _MAX_TOPIC_CHARS:
+        return True
+    if _RESUME_SUMMARY_MARKERS.search(cleaned):
+        return True
+    if "," in cleaned and len(words) > 5:
+        return True
+    return False
+
+
+def _short_topic_label(text: str, *, max_words: int = _MAX_TOPIC_WORDS) -> str:
+    """Turn resume evidence into a short skill/project label for interview templates."""
+    cleaned = _clean_text(text).strip(" ,;|.-")
+    if not cleaned:
+        return ""
+
+    first = re.split(r"[.!?;|\n]\s*", cleaned)[0].strip()
+    for sep in (" - ", " – ", " — ", ": "):
+        if sep in first:
+            left = first.split(sep, 1)[0].strip()
+            if left and not _looks_like_resume_summary(left) and len(left.split()) <= max_words:
+                return left
+            first = left or first
+            break
+
+    words = first.split()
+    if len(words) > max_words:
+        first = " ".join(words[:max_words]).rstrip(",;:")
+    if _looks_like_resume_summary(first):
+        return ""
+    return first
+
+
+def _topic_signals(values: Iterable[Any], default: str, count: int = 3) -> list[str]:
+    """Dedupe and keep only short topic labels (never resume-summary sentences)."""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        label = _short_topic_label(value)
+        if not label:
+            continue
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= count:
+            break
+    return labels if labels else [default]
+
+
 def _as_list(value: Any) -> list[Any]:
     if value is None:
         return []
@@ -1402,54 +1474,55 @@ class InterviewBlueprintGenerator:
             for key, minutes in category_minutes.items()
         }
 
+        # Short labels only — never dump resume objective/summary prose into signals.
+        # Long blurbs become odd Agent 4 questions when filled into {signal}/{skill}.
         resume_signals = {
-            "introductory_questions": _top(
+            "introductory_questions": _topic_signals(
                 [
                     _clean_text(payload.resume_json.get("candidate_name")),
                     *experience_evidence,
-                    resume_text[:220],
                 ],
-                "Resume profile and extracted sections are available for opening context.",
+                "candidate background",
                 3,
             ),
-            "skills_jd_keyword_questions": _top(
+            "skills_jd_keyword_questions": _topic_signals(
                 resume_skills + ats_matched,
-                "Resume skills were limited; use upstream matched/missing skill output.",
+                "core skills",
                 6,
             ),
-            "project_related_questions": _top(
+            "project_related_questions": _topic_signals(
                 project_evidence,
-                "No strong project evidence found; keep this category lighter and resume-grounded.",
+                "your project",
                 4,
             ),
-            "education_courses_questions": _top(
+            "education_courses_questions": _topic_signals(
                 education_evidence,
-                "No detailed education/course evidence found; use only available education fields.",
+                "your coursework",
                 4,
             ),
         }
 
         jd_signals = {
-            "introductory_questions": _top(
+            "introductory_questions": _topic_signals(
                 [job_title, *_flatten_strings(jd_json.get("responsibilities"), 4)],
-                "JD role context provided.",
+                "the role",
                 4,
             ),
-            "skills_jd_keyword_questions": _top(
+            "skills_jd_keyword_questions": _topic_signals(
                 required_skills + preferred_skills + jd_keywords + ats_missing,
-                "JD skills/keywords were limited; use JD responsibilities as role signal.",
+                "the job requirements",
                 8,
             ),
-            "project_related_questions": _top(
-                _flatten_strings(jd_json.get("responsibilities"), 8)
-                + required_skills,
-                "Map projects to JD responsibilities and required skills.",
+            "project_related_questions": _topic_signals(
+                required_skills
+                + _flatten_strings(jd_json.get("responsibilities"), 8),
+                "the job requirements",
                 6,
             ),
-            "education_courses_questions": _top(
-                _flatten_strings(jd_json.get("education_requirements"), 5)
-                + required_skills,
-                "Map courses/education to JD skill requirements.",
+            "education_courses_questions": _topic_signals(
+                required_skills
+                + _flatten_strings(jd_json.get("education_requirements"), 5),
+                "the job requirements",
                 6,
             ),
         }

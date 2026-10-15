@@ -9,6 +9,9 @@ from typing import Any
 from agents.interview_agent.followup_generator import generate_followups
 from agents.interview_agent.question_generator import (
     generate_questions_from_blueprint,
+    is_spoken_interview_question,
+    looks_like_resume_summary,
+    sanitize_topic,
     shorten_question,
     _looks_like_intro,
     _question_key,
@@ -71,28 +74,43 @@ def generate_questions_with_llama(
         }
         for q in base[:20]
     ]
+    # Structured topic lists for the LLM — never paste raw resume objective prose.
+    skill_topics = sorted(
+        {
+            sanitize_topic(str(tag))
+            for q in base
+            for tag in (q.skill_tags or [])
+            if sanitize_topic(str(tag))
+        }
+    )
     system = (
         "You are a senior interviewer with 15 years of hiring experience. "
         "Rewrite each seed so it sounds like a real human interviewer speaking live — "
         "calm, professional, specific, and conversational. "
         "Rules: one question, one question mark, max 28 words, no bullet lists, "
         "no 'please introduce yourself' cliches, no stacking two questions. "
+        "NEVER turn a resume objective/summary/profile sentence into the question. "
+        "Never start with Motivated/Passionate/Dedicated/graduate with… style bios. "
         "Introductory questions must be a genuine opening about background or motivation. "
         "Do NOT put FastAPI, Flask, Python, or any tool into an intro question. "
         "Experience questions should probe ownership, delivery, and judgment. "
-        "Skills and project questions should use the seed skill_tags and resume/JD facts. "
+        "Skills and project questions must ask about a short skill or project name from skill_tags "
+        "(1-4 words only). Do not quote long resume lines. "
         "Cover different topics. Keep the same count, order, and category as the seeds. "
         "Each question_text MUST be unique — never repeat or lightly rephrase another seed. "
+        "skill_tags must stay short labels only (skill or project name). "
         "You may borrow phrasing from past questions that worked, but do not copy them verbatim. "
         "Return JSON: {\"questions\": [{\"order\":1,\"question_text\":\"...\","
         "\"intent\":\"...\",\"follow_up_hints\":[\"...\"],\"skill_tags\":[\"...\"]}] }"
     )
     user = (
         f"Job title: {job_title or ctx.get('job_position') or 'role'}\n"
-        f"Resume summary: {ctx.get('resume_summary') or 'n/a'}\n"
-        f"Skills: {ctx.get('skills') or 'n/a'}\n"
+        f"Allowed short topics (prefer these): {', '.join(skill_topics) or 'n/a'}\n"
+        f"Skills list: {ctx.get('skills') or 'n/a'}\n"
         f"JD requirements: {ctx.get('jd_requirements') or 'n/a'}\n"
-        f"JD excerpt: {ctx.get('jd_text') or 'n/a'}\n\n"
+        f"JD excerpt: {ctx.get('jd_text') or 'n/a'}\n"
+        f"Resume context (do NOT read this aloud as a question): "
+        f"{(ctx.get('resume_summary') or 'n/a')[:400]}\n\n"
         f"Past questions that worked for similar roles:\n{past_questions}\n\n"
         f"Seed questions JSON:\n{preview}"
     )
@@ -112,7 +130,12 @@ def generate_questions_with_llama(
             item = by_order.get(q.order) or {}
             text = str(item.get("question_text") or q.question_text).strip()
             text = shorten_question(text or q.question_text, 28)
-            tags = list(item.get("skill_tags") or q.skill_tags)[:5] or list(q.skill_tags)
+            raw_tags = list(item.get("skill_tags") or q.skill_tags)[:5] or list(q.skill_tags)
+            tags = [
+                tag
+                for tag in (sanitize_topic(str(t)) for t in raw_tags)
+                if tag and not looks_like_resume_summary(tag)
+            ][:3]
             planned = [str(tag) for tag in (q.skill_tags or []) if len(str(tag)) > 2]
             if q.category_id == "introductory_questions":
                 tags = []
@@ -125,8 +148,15 @@ def generate_questions_with_llama(
             elif planned and not any(tag.lower() in text.lower() for tag in planned):
                 if q.category_id in {"skills_jd_keyword_questions", "project_related_questions"}:
                     text = shorten_question(q.question_text, 28)
-                    tags = list(q.skill_tags)
+                    tags = [
+                        tag
+                        for tag in (sanitize_topic(str(t)) for t in (q.skill_tags or []))
+                        if tag
+                    ][:3]
             if q.category_id != "introductory_questions" and _looks_like_intro(text):
+                text = q.question_text
+            if not is_spoken_interview_question(text):
+                # Fall back to the template seed (already validated in question_generator).
                 text = q.question_text
             key = _question_key(text)
             if not key or key in used_texts:
@@ -141,7 +171,10 @@ def generate_questions_with_llama(
                         "follow_up_hints": list(item.get("follow_up_hints") or q.follow_up_hints)[
                             :3
                         ],
-                        "skill_tags": tags,
+                        "skill_tags": tags
+                        if q.category_id
+                        not in {"introductory_questions", "experience_questions"}
+                        else [],
                     }
                 )
             )

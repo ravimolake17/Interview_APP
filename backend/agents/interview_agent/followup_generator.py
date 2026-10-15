@@ -6,7 +6,11 @@ import re
 import uuid
 from typing import Any
 
-from agents.interview_agent.question_generator import shorten_question
+from agents.interview_agent.question_generator import (
+    looks_like_resume_summary,
+    sanitize_topic,
+    shorten_question,
+)
 from agents.interview_agent.schemas import FollowUpQuestion
 
 _THIN_ANSWER = re.compile(
@@ -68,16 +72,24 @@ def build_turn_ack(
     skill = ""
     tags = list(next_question.get("skill_tags") or [])
     if tags:
-        skill = str(tags[0]).strip()
-    skip_skill = skill.casefold() in {
-        "",
-        "core skills",
-        "the required skill",
-        "your experience",
-        "this role",
-        "your project",
-        "your coursework",
-    }
+        skill = sanitize_topic(str(tags[0]).strip())
+    skip_skill = (
+        not skill
+        or looks_like_resume_summary(skill)
+        or len(skill.split()) > 6
+        or skill.casefold()
+        in {
+            "core skills",
+            "the required skill",
+            "your experience",
+            "this role",
+            "your project",
+            "your coursework",
+            "candidate background",
+            "the job requirements",
+            "the role",
+        }
+    )
     if skill and not skip_skill:
         return f"{thanks} Next, a short question on {skill}."
     category = str(next_question.get("category_name") or "the next topic").strip()

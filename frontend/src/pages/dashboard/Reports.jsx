@@ -167,13 +167,36 @@ export default function Reports() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <ChartCard title="Applications by Job" subtitle="Current open positions" delay={0.1}>
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={applicationsPerJob} barSize={28}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" vertical={false} />
-              <XAxis dataKey="name" tick={{ fill: 'var(--color-text-muted)', fontSize: 10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} />
+          <ResponsiveContainer width="100%" height={Math.max(200, applicationsPerJob.length * 42)}>
+            <BarChart
+              layout="vertical"
+              data={applicationsPerJob}
+              barSize={18}
+              margin={{ top: 4, right: 16, left: 4, bottom: 4 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" horizontal={false} />
+              <XAxis
+                type="number"
+                allowDecimals={false}
+                tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <YAxis
+                type="category"
+                dataKey="name"
+                width={140}
+                interval={0}
+                tick={{ fill: 'var(--color-text-muted)', fontSize: 10 }}
+                tickFormatter={(value) => {
+                  const label = String(value || '');
+                  return label.length > 22 ? `${label.slice(0, 20)}…` : label;
+                }}
+                axisLine={false}
+                tickLine={false}
+              />
               <Tooltip content={<CustomTooltip />} />
-              <Bar dataKey="applicants" name="Applicants" fill="#2563EB" radius={[6, 6, 0, 0]} />
+              <Bar dataKey="applicants" name="Applicants" fill="#2563EB" radius={[0, 6, 6, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartCard>

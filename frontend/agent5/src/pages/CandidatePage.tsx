@@ -103,7 +103,21 @@ function errorMessage(error: unknown): string {
       return `${detail.message}.${missing}`
     }
   }
+  if (error instanceof ApiError && typeof error.detail === 'string') return error.detail
   return error instanceof Error ? error.message : String(error)
+}
+
+/** Never show provider/STT internals (Azure/Whisper) to candidates. */
+function candidateSpeechError(error: unknown): string {
+  const raw = errorMessage(error)
+  if (
+    /empty transcript|azure speech|whisper|speech-to-text|\bstt\b|no answer audio|could not detect your answer|transcri/i.test(
+      raw,
+    )
+  ) {
+    return 'We could not hear your answer clearly. Please speak again after the question.'
+  }
+  return raw
 }
 
 function terminationCopy(reason: string | null | undefined): string {
@@ -2162,7 +2176,9 @@ export function CandidatePage() {
         120_000,
       )
       const text = (transcribed.text || '').trim()
-      if (!text) throw new Error('Could not detect your answer. Please speak clearly after the AI question.')
+      if (!text) {
+        throw new Error('We could not hear your answer clearly. Please speak again after the question.')
+      }
       const next = await requestJson<AiInterviewSessionResponse>(
         `/api/interview/room/sessions/${current.sessionId}/ai/answer`,
         jsonRequest('POST', { answer_text: text }),
@@ -2184,7 +2200,7 @@ export function CandidatePage() {
       await speakAiQuestion(current, next)
     } catch (error) {
       setConversationState('idle')
-      showMessage(errorMessage(error), 'error')
+      showMessage(candidateSpeechError(error), 'error')
       if (phaseRef.current === 'interview' && !leavingInterviewRef.current) {
         await startAnswerCapture()
       }
