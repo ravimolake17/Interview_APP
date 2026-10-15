@@ -137,15 +137,37 @@ function toInterviewerJoinLink(joinLink) {
   }
 }
 
-/** Full Agent5 review UI lives on the Proctor host, not on intapp. */
-function toProctorMonitorUrl(joinLink, sessionId) {
-  let origin = 'https://proctor.rrglobal.com';
-  try {
-    if (joinLink) origin = new URL(joinLink, window.location.origin).origin;
-  } catch {
-    /* keep default */
+/** Full Agent5 review UI lives on the Proctor host — never on intapp. */
+function resolveProctorOrigin(agent5) {
+  const candidates = [
+    agent5?.monitor_url,
+    agent5?.proctoring_url,
+    import.meta.env.VITE_AGENT5_PUBLIC_URL,
+    import.meta.env.VITE_PROCTOR_ORIGIN,
+  ];
+  for (const raw of candidates) {
+    const value = String(raw || '').trim();
+    if (!value) continue;
+    try {
+      const origin = new URL(value, window.location.origin).origin;
+      const host = new URL(origin).hostname.toLowerCase();
+      // Candidate join links are on intapp; those must not become the monitor host.
+      if (host.startsWith('intapp.')) continue;
+      return origin;
+    } catch {
+      /* try next */
+    }
   }
-  const url = new URL('/monitor/', origin);
+  const host = window.location.hostname.toLowerCase();
+  if (host.startsWith('intapp.')) {
+    return `${window.location.protocol}//${host.replace(/^intapp\./, 'proctor.')}`;
+  }
+  if (host.startsWith('proctor.')) return window.location.origin;
+  return 'https://proctor.rrglobal.com';
+}
+
+function toProctorMonitorUrl(agent5, sessionId) {
+  const url = new URL('/monitor/', resolveProctorOrigin(agent5));
   if (sessionId) url.searchParams.set('session_id', sessionId);
   const token = localStorage.getItem('hr_access_token');
   if (token) url.searchParams.set('hr_token', token);
@@ -2683,7 +2705,7 @@ export default function CandidateAgentsDashboard() {
               <p className="text-xs text-muted">No fraud events were recorded for this session.</p>
             )}
             <a
-              href={toProctorMonitorUrl(candidate?.joinLink, agent5?.agent5_session_id)}
+              href={toProctorMonitorUrl(agent5, agent5?.agent5_session_id)}
               target="_blank"
               rel="noreferrer"
               className="btn-secondary inline-flex items-center gap-2 px-3 py-2 text-sm"

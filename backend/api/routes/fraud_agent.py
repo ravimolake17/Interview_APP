@@ -48,6 +48,8 @@ class FraudStatusResponse(BaseModel):
     session_status: str | None = None
     join_link: str | None = None
     verification_status: str | None = None
+    monitor_url: str | None = None
+    proctoring_url: str | None = None
 
 
 class Agent5ReportResponse(BaseModel):
@@ -156,6 +158,15 @@ async def fraud_status(
     join_link = meta.get("join_link")
     verification_status = session_status or "not_started"
 
+    monitor_url = str(meta.get("monitor_url") or "").strip() or None
+    proctoring_url = str(meta.get("proctoring_url") or "").strip() or None
+    if session_id and not monitor_url:
+        base = settings.agent5_public_url.rstrip("/")
+        if base:
+            monitor_url = f"{base}/monitor/"
+            if not proctoring_url:
+                proctoring_url = f"{base}/proctoring/"
+
     return FraudStatusResponse(
         candidate_id=candidate_id,
         enabled=bool(startup_agent5().get("ok")),
@@ -166,6 +177,8 @@ async def fraud_status(
         session_status=session_status,
         join_link=join_link,
         verification_status=verification_status,
+        monitor_url=monitor_url,
+        proctoring_url=proctoring_url,
     )
 
 
