@@ -114,6 +114,15 @@ async def _company_name(db: AsyncSession, candidate: Candidate) -> str:
     return (company.name if company and company.name else "RR Parkon").strip() or "RR Parkon"
 
 
+async def _company_intro_spoken(db: AsyncSession, candidate: Candidate) -> str:
+    if not candidate.company_id:
+        return ""
+    company = await CompanyRepository(db).get_by_id(int(candidate.company_id))
+    if not company:
+        return ""
+    return (company.interview_intro_spoken or company.interview_intro or "").strip()
+
+
 async def _planned_minutes(db: AsyncSession, candidate: Candidate) -> int:
     questions_repo = InterviewQuestionSetRepository(db)
     latest = await questions_repo.get_latest(candidate.candidate_id)
@@ -242,6 +251,7 @@ async def ensure_mcq(
             company_name=company,
             role=candidate.job_position or "",
             interviewer_name=primary_interviewer_name(),
+            company_intro=await _company_intro_spoken(db, candidate),
         ),
         "rules_message": mcq_rules_message(minutes=max(1, round(duration / 60)), count=len(questions)),
         "oral_rules_message": oral_rules_message(),

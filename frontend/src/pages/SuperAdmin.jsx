@@ -69,6 +69,7 @@ const EMPTY_ADMIN = {
 const EMPTY_DEPT = {
   name: '',
   description: '',
+  interview_brief: '',
   sort_order: 0,
   company_id: '',
 };
@@ -78,6 +79,7 @@ const EMPTY_COMPANY = {
   code: '',
   logo: '',
   status: 'active',
+  interview_intro: '',
 };
 
 const inputCls = 'input-field';
@@ -231,6 +233,7 @@ export default function SuperAdmin() {
         code: companyRecordForm.code.trim().toUpperCase(),
         logo: companyRecordForm.logo.trim() || null,
         status: companyRecordForm.status,
+        interview_intro: companyRecordForm.interview_intro.trim() || null,
       };
       if (editingCompanyId) {
         await updateCompany(editingCompanyId, payload);
@@ -314,12 +317,14 @@ export default function SuperAdmin() {
         await updateDepartment(editingDeptId, {
           name: deptForm.name.trim(),
           description: deptForm.description,
+          interview_brief: deptForm.interview_brief.trim() || null,
         });
         setMessage('Department updated.');
       } else {
         await createDepartment({
           name: deptForm.name.trim(),
           description: deptForm.description,
+          interview_brief: deptForm.interview_brief.trim() || null,
           sort_order: Number(deptForm.sort_order) || departments.length,
           is_active: true,
           company_id: Number(deptForm.company_id),
@@ -522,6 +527,18 @@ export default function SuperAdmin() {
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
             </select>
+            <div>
+              <label className={labelCls} htmlFor="company-interview-intro">Interview company intro</label>
+              <textarea
+                id="company-interview-intro"
+                className={`${inputCls} min-h-[120px]`}
+                placeholder="Paste or write company background. Long text is shortened and saved for the AI spoken introduction."
+                value={companyRecordForm.interview_intro}
+                onChange={(e) => setCompanyRecordForm((f) => ({ ...f, interview_intro: e.target.value }))}
+                rows={5}
+              />
+              <p className="text-xs text-muted mt-1">Spoken at interview start. If long, AI shortens and stores a spoken version.</p>
+            </div>
             <button type="submit" disabled={saving} className="btn-primary w-full">
               {saving ? 'Saving…' : editingCompanyId ? 'Update company' : 'Create company'}
             </button>
@@ -568,6 +585,7 @@ export default function SuperAdmin() {
                             code: company.code,
                             logo: company.logo || '',
                             status: company.status,
+                            interview_intro: company.interview_intro || '',
                           });
                         }}
                       >
@@ -692,39 +710,54 @@ export default function SuperAdmin() {
 
       {tab === 'departments' && (
         <div className="space-y-4">
-          <form onSubmit={saveDepartment} className="card p-5 grid sm:grid-cols-5 gap-3">
-            <input className={inputCls} placeholder="Department name" value={deptForm.name} onChange={(e) => setDeptForm((f) => ({ ...f, name: e.target.value }))} required />
-            <input className={`${inputCls} sm:col-span-2`} placeholder="Description" value={deptForm.description} onChange={(e) => setDeptForm((f) => ({ ...f, description: e.target.value }))} />
-            <select
-              className={inputCls}
-              value={deptForm.company_id}
-              onChange={(e) => setDeptForm((f) => ({ ...f, company_id: e.target.value }))}
-              required={!editingDeptId}
-              disabled={Boolean(editingDeptId)}
-            >
-              <option value="">Select company</option>
-              {companies.map((company) => (
-                <option key={company.id} value={company.id}>{company.name}</option>
-              ))}
-            </select>
-            <button type="submit" className="btn-primary inline-flex items-center justify-center gap-2">
-              <Plus size={14} /> {editingDeptId ? 'Save' : 'Add'}
-            </button>
-            {editingDeptId && (
-              <button
-                type="button"
-                className="btn-secondary sm:col-start-5"
-                onClick={() => {
-                  setEditingDeptId(null);
-                  setDeptForm({
-                    ...EMPTY_DEPT,
-                    company_id: workingCompanyId ? String(workingCompanyId) : '',
-                  });
-                }}
+          <form onSubmit={saveDepartment} className="card p-5 space-y-3">
+            <div className="grid sm:grid-cols-5 gap-3">
+              <input className={inputCls} placeholder="Department name" value={deptForm.name} onChange={(e) => setDeptForm((f) => ({ ...f, name: e.target.value }))} required />
+              <input className={`${inputCls} sm:col-span-2`} placeholder="Description" value={deptForm.description} onChange={(e) => setDeptForm((f) => ({ ...f, description: e.target.value }))} />
+              <select
+                className={inputCls}
+                value={deptForm.company_id}
+                onChange={(e) => setDeptForm((f) => ({ ...f, company_id: e.target.value }))}
+                required={!editingDeptId}
+                disabled={Boolean(editingDeptId)}
               >
-                Cancel
-              </button>
-            )}
+                <option value="">Select company</option>
+                {companies.map((company) => (
+                  <option key={company.id} value={company.id}>{company.name}</option>
+                ))}
+              </select>
+              <div className="flex gap-2">
+                <button type="submit" className="btn-primary inline-flex flex-1 items-center justify-center gap-2">
+                  <Plus size={14} /> {editingDeptId ? 'Save' : 'Add'}
+                </button>
+                {editingDeptId && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      setEditingDeptId(null);
+                      setDeptForm({
+                        ...EMPTY_DEPT,
+                        company_id: workingCompanyId ? String(workingCompanyId) : '',
+                      });
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </div>
+            <div>
+              <label className={labelCls} htmlFor="dept-interview-brief">Interview department brief</label>
+              <textarea
+                id="dept-interview-brief"
+                className={`${inputCls} min-h-[100px]`}
+                placeholder="Facts the AI interviewer can share when the candidate asks about this department."
+                value={deptForm.interview_brief}
+                onChange={(e) => setDeptForm((f) => ({ ...f, interview_brief: e.target.value }))}
+                rows={4}
+              />
+            </div>
           </form>
           <div className="card p-0 overflow-hidden">
             <div className="px-4 py-3 border-b border-col flex flex-wrap items-center justify-between gap-3">
@@ -757,6 +790,7 @@ export default function SuperAdmin() {
                           setDeptForm({
                             name: department.name,
                             description: department.description || '',
+                            interview_brief: department.interview_brief || '',
                             sort_order: department.sort_order || 0,
                             company_id: department.company_id ? String(department.company_id) : '',
                           });

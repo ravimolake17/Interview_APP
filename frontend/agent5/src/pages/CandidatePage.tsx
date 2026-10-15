@@ -2154,6 +2154,12 @@ export function CandidatePage() {
     if (recorder && recorder.state !== 'inactive') {
       await new Promise<void>((resolve) => {
         recorder.onstop = () => resolve()
+        // Flush the final timeslice so the last spoken words are in the blob.
+        try {
+          if (recorder.state === 'recording') recorder.requestData()
+        } catch {
+          /* some browsers reject requestData outside recording */
+        }
         recorder.stop()
       })
     }

@@ -46,6 +46,23 @@ def answer_warrants_followup(
     return bool(eval_data.get("suggest_followup")) and verdict in {"weak", "adequate"}
 
 
+def should_treat_as_unanswered(
+    answer: str,
+    evaluation: dict[str, Any] | None = None,
+) -> bool:
+    """True only when there was no usable answer — never when Agent 6 scored a real reply."""
+    cleaned = (answer or "").strip()
+    if not cleaned:
+        return True
+    verdict = str((evaluation or {}).get("verdict") or "").lower()
+    # Any scored substantive verdict means the candidate answered (incl. HR-added questions).
+    if verdict in {"strong", "adequate", "weak"}:
+        return False
+    if verdict in {"insufficient", "off_topic"}:
+        return True
+    return answer_is_thin(cleaned)
+
+
 def build_turn_ack(
     *,
     evaluation: dict[str, Any] | None = None,

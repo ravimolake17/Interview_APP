@@ -105,6 +105,7 @@ async def create_department(
     row = await repo.create(
         name=payload.name,
         description=payload.description,
+        interview_brief=payload.interview_brief,
         sort_order=payload.sort_order,
         is_active=payload.is_active,
         company_id=company_id,
@@ -117,7 +118,12 @@ async def create_department(
         request=request,
         ip_address=get_client_ip(request),
         details={"name": row.name, "company_id": company_id},
-        new_value={"name": row.name, "description": row.description, "is_active": row.is_active},
+        new_value={
+            "name": row.name,
+            "description": row.description,
+            "interview_brief": row.interview_brief,
+            "is_active": row.is_active,
+        },
         message=f"{admin.full_name} created department {row.name}.",
         company_id=company_id,
     )
@@ -147,6 +153,7 @@ async def update_department(
     before = {
         "name": row.name,
         "description": row.description,
+        "interview_brief": row.interview_brief,
         "is_active": row.is_active,
         "sort_order": row.sort_order,
     }
@@ -157,6 +164,8 @@ async def update_department(
         row.name = data["name"].strip()
     if "description" in data:
         row.description = (data["description"] or "").strip() or None
+    if "interview_brief" in data:
+        row.interview_brief = (data["interview_brief"] or "").strip() or None
     if "is_active" in data and data["is_active"] is not None:
         row.is_active = data["is_active"]
     if "sort_order" in data and data["sort_order"] is not None:
@@ -164,6 +173,7 @@ async def update_department(
     after = {
         "name": row.name,
         "description": row.description,
+        "interview_brief": row.interview_brief,
         "is_active": row.is_active,
         "sort_order": row.sort_order,
     }

@@ -107,11 +107,23 @@ class InterviewLangGraphAgent:
         if not candidate:
             return {}
         snap = candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
-        return build_candidate_context(
+        context = build_candidate_context(
             jd_text=candidate.jd_text,
             evaluation_snapshot=snap,
             job_position=candidate.job_position,
         )
+        from services.interview_brief_service import load_interview_reference_briefs
+
+        briefs = await load_interview_reference_briefs(self.db, candidate)
+        context.update(
+            {
+                "company_intro": briefs.get("company_intro") or "",
+                "department_name": briefs.get("department_name") or "",
+                "department_brief": briefs.get("department_brief") or "",
+                "role_summary": briefs.get("role_summary") or "",
+            }
+        )
+        return context
 
     async def start_session(self, candidate_id: str, *, force_questions: bool = False) -> dict[str, Any]:
         """Ensure Llama questions exist, then run until first answer interrupt."""

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from agents.evaluation_agent.evaluator import (
     build_candidate_context,
@@ -161,6 +164,16 @@ class EvaluationAgentService:
         candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
             raise ValueError(f"Candidate not found: {candidate_id}")
+        # Re-transcribe saved clips when STT previously truncated the text.
+        try:
+            from services.interview_transcript_repair import repair_truncated_oral_transcripts
+
+            repaired = await repair_truncated_oral_transcripts(self.db, candidate)
+            if repaired:
+                await self.db.commit()
+                await self.db.refresh(candidate)
+        except Exception:
+            logger.exception("Oral transcript repair skipped for %s", candidate_id)
         rows = await self.eval_repo.list_for_candidate(candidate_id, limit=100)
         report = await self._answer_report(candidate_id, candidate)
         evaluations = [

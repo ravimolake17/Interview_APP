@@ -49,6 +49,7 @@ async def create_company(
             code=payload.code,
             logo=payload.logo,
             status=payload.status,
+            interview_intro=payload.interview_intro,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -65,6 +66,7 @@ async def create_company(
             "code": company.code,
             "status": company.status,
             "logo": company.logo,
+            "interview_intro": company.interview_intro,
         },
         message=f"{superadmin.full_name} created company {company.name}.",
         company_id=company.id,
@@ -92,6 +94,7 @@ async def update_company(
         "code": company.code,
         "status": company.status,
         "logo": company.logo,
+        "interview_intro": company.interview_intro,
     }
     try:
         company = await service.update(company, **data)
@@ -102,6 +105,7 @@ async def update_company(
         "code": company.code,
         "status": company.status,
         "logo": company.logo,
+        "interview_intro": company.interview_intro,
     }
     await AuditService(db).log(
         action="COMPANY_UPDATED",

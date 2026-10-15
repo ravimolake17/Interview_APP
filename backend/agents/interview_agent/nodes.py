@@ -14,14 +14,14 @@ from datetime import datetime, timezone
 from agents.evaluation_agent.evaluator import evaluate_answer_with_llama
 from agents.interview_agent.adaptive import generate_adaptive_followups
 from agents.interview_agent.followup_generator import (
-    answer_is_thin,
     answer_warrants_followup,
     build_turn_ack,
+    should_treat_as_unanswered,
 )
 from agents.interview_agent.candidate_qna import (
     CLOSING_THANK_YOU,
     MAX_QNA_TURNS,
-    QNA_OPENING,
+    build_qna_opening,
     generate_candidate_qna_reply,
     qna_prompt_question,
 )
@@ -97,11 +97,17 @@ def load_session(state: InterviewAgentState) -> dict[str, Any]:
     }
 
 
+def _qna_opening_from_state(state: InterviewAgentState) -> str:
+    ctx = state.get("EvaluationContext") or {}
+    return build_qna_opening(role_summary=str(ctx.get("role_summary") or ""))
+
+
 def present_question(state: InterviewAgentState) -> dict[str, Any]:
     questions = list(state.get("Questions") or [])
     index = int(state.get("CurrentIndex") or 0)
     phase = str(state.get("InterviewPhase") or "QUESTIONS")
     pending_reply = str(state.get("PendingAiReply") or "").strip()
+    qna_opening = _qna_opening_from_state(state)
 
     if phase == "CANDIDATE_QNA":
         turns = int(state.get("CandidateQnaTurns") or 0)
@@ -118,7 +124,7 @@ def present_question(state: InterviewAgentState) -> dict[str, Any]:
         if turns <= 0:
             return {
                 "Status": "AWAITING_ANSWER",
-                "CurrentQuestion": qna_prompt_question(QNA_OPENING, turn=0),
+                "CurrentQuestion": qna_prompt_question(qna_opening, turn=0),
                 "AnswerText": None,
                 "RemainingQuestions": 0,
                 "PendingFollowUpMode": False,
@@ -135,7 +141,7 @@ def present_question(state: InterviewAgentState) -> dict[str, Any]:
     if index >= len(questions) and not state.get("PendingFollowUpMode"):
         return {
             "Status": "AWAITING_ANSWER",
-            "CurrentQuestion": qna_prompt_question(QNA_OPENING, turn=0),
+            "CurrentQuestion": qna_prompt_question(qna_opening, turn=0),
             "AnswerText": None,
             "RemainingQuestions": 0,
             "PendingFollowUpMode": False,
@@ -171,7 +177,7 @@ def present_question(state: InterviewAgentState) -> dict[str, Any]:
     if index >= len(questions):
         return {
             "Status": "AWAITING_ANSWER",
-            "CurrentQuestion": qna_prompt_question(QNA_OPENING, turn=0),
+            "CurrentQuestion": qna_prompt_question(qna_opening, turn=0),
             "AnswerText": None,
             "RemainingQuestions": 0,
             "PendingFollowUpMode": False,
@@ -264,8 +270,16 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
                 "Model": llama_model_id(),
             }
 
-        job_position = str((state.get("EvaluationContext") or {}).get("job_position") or "")
-        result = generate_candidate_qna_reply(answer, job_position=job_position, turn=turns)
+        ctx = state.get("EvaluationContext") or {}
+        result = generate_candidate_qna_reply(
+            answer,
+            job_position=str(ctx.get("job_position") or ""),
+            turn=turns,
+            role_summary=str(ctx.get("role_summary") or ""),
+            department_brief=str(ctx.get("department_brief") or ""),
+            department_name=str(ctx.get("department_name") or ""),
+            company_intro=str(ctx.get("company_intro") or ""),
+        )
         history.append(
             {
                 "question": question,
@@ -493,7 +507,7 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
         "TurnAck": build_turn_ack(
             evaluation=eval_dict,
             next_question=next_q,
-            unanswered=answer_is_thin(answer),
+            unanswered=should_treat_as_unanswered(answer, eval_dict),
             next_is_followup=pending_followup,
         ),
         "Error": None,

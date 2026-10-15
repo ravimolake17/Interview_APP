@@ -105,7 +105,12 @@ def upsert_oral_turn(candidate: Candidate, turn: dict[str, Any]) -> dict[str, An
         existing_text = " ".join(str(existing.get("question_text") or "").split()).lower()
         if (qid and existing_id == qid) or (qtext and existing_text == qtext):
             merged = dict(existing)
+            existing_answer = str(existing.get("answer_text") or "").strip()
+            incoming_answer = str(payload.get("answer_text") or "").strip()
             merged.update(payload)
+            # Never replace a longer saved transcript with a shorter partial one.
+            if existing_answer and len(existing_answer) > len(incoming_answer):
+                merged["answer_text"] = existing_answer
             turns[index] = merged
             replaced = True
             payload = merged

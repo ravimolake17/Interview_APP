@@ -112,6 +112,15 @@ def _merge_turn(base: Any, incoming: Any) -> dict[str, Any]:
         if value in (None, "", [], {}):
             continue
         current = merged.get(key)
+        if key == "answer_text":
+            # Keep the fuller transcript when sources disagree (partial STT vs later sync).
+            cur = str(current or "").strip()
+            nxt = str(value or "").strip()
+            if len(nxt) > len(cur):
+                merged[key] = nxt
+            elif not cur:
+                merged[key] = nxt
+            continue
         if key == "audio_path" or current in (None, "", [], {}, 0, 0.0):
             merged[key] = value
     return merged

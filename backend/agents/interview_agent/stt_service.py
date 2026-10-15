@@ -293,6 +293,12 @@ def _ffmpeg_exe() -> str | None:
     return None
 
 
+# Azure short-audio REST rejects / truncates clips near ~60s. Stay under that.
+_AZURE_CHUNK_SECONDS = 45.0
+_AZURE_CHUNK_OVERLAP = 1.0
+_AZURE_CHUNK_THRESHOLD = 48.0
+
+
 def _to_azure_wav(content: bytes, suffix: str) -> tuple[bytes, str]:
     """Azure short-audio REST is most reliable with 16 kHz PCM WAV."""
     wav_type = "audio/wav; codecs=audio/pcm; samplerate=16000"
@@ -327,7 +333,7 @@ def _to_azure_wav(content: bytes, suffix: str) -> tuple[bytes, str]:
             converted = subprocess.run(
                 [ffmpeg, "-y", "-i", str(source), "-ac", "1", "-ar", "16000", "-f", "wav", str(target)],
                 capture_output=True,
-                timeout=30,
+                timeout=60,
                 check=False,
             )
             if converted.returncode == 0 and target.exists() and target.stat().st_size > 44:
@@ -338,37 +344,106 @@ def _to_azure_wav(content: bytes, suffix: str) -> tuple[bytes, str]:
     return content, _AZURE_CONTENT_TYPES.get(suffix, "audio/webm; codecs=opus")
 
 
-def _transcribe_azure_speech(
-    entry: AICatalogEntry,
-    content: bytes,
+def _wav_duration_seconds(wav_bytes: bytes) -> float | None:
+    """Return PCM WAV duration when headers are readable."""
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
+            rate = handle.getframerate() or 0
+            frames = handle.getnframes() or 0
+            if rate <= 0 or frames <= 0:
+                return None
+            return float(frames) / float(rate)
+    except Exception:
+        return None
+
+
+def _split_pcm_wav(wav_bytes: bytes, *, chunk_seconds: float, overlap_seconds: float) -> list[bytes]:
+    """Split 16-bit PCM WAV into overlapping chunks for Azure short-audio STT."""
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
+            channels = handle.getnchannels()
+            sample_width = handle.getsampwidth()
+            rate = handle.getframerate()
+            frames = handle.readframes(handle.getnframes())
+    except Exception:
+        return [wav_bytes]
+
+    if rate <= 0 or sample_width <= 0 or channels <= 0 or not frames:
+        return [wav_bytes]
+
+    frame_bytes = sample_width * channels
+    total_frames = len(frames) // frame_bytes
+    chunk_frames = max(1, int(chunk_seconds * rate))
+    overlap_frames = max(0, int(overlap_seconds * rate))
+    if total_frames <= chunk_frames:
+        return [wav_bytes]
+
+    parts: list[bytes] = []
+    start = 0
+    while start < total_frames:
+        end = min(total_frames, start + chunk_frames)
+        slice_frames = frames[start * frame_bytes : end * frame_bytes]
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as out:
+            out.setnchannels(channels)
+            out.setsampwidth(sample_width)
+            out.setframerate(rate)
+            out.writeframes(slice_frames)
+        parts.append(buf.getvalue())
+        if end >= total_frames:
+            break
+        start = max(start + 1, end - overlap_frames)
+    return parts or [wav_bytes]
+
+
+def _join_transcript_chunks(parts: list[str]) -> str:
+    """Concatenate chunk transcripts and drop obvious overlap repeats."""
+    joined = ""
+    for raw in parts:
+        part = " ".join((raw or "").split()).strip()
+        if not part:
+            continue
+        if not joined:
+            joined = part
+            continue
+        left = joined.lower().split()
+        right = part.lower().split()
+        max_overlap = min(12, len(left), len(right))
+        overlap = 0
+        for size in range(max_overlap, 2, -1):
+            if left[-size:] == right[:size]:
+                overlap = size
+                break
+        remainder = part.split()[overlap:]
+        if remainder:
+            joined = f"{joined} {' '.join(remainder)}".strip()
+    return joined
+
+
+def _azure_recognize_once(
     *,
-    suffix: str,
-    language: str | None,
-) -> tuple[str, float | None, str | None, str, str]:
+    url: str,
+    key: str,
+    locale: str,
+    payload: bytes,
+    content_type: str,
+) -> tuple[str, float | None]:
     import httpx
 
-    key = getattr(settings, "AZURE_SPEECH_KEY", None)
-    region = (entry.region or getattr(settings, "AZURE_SPEECH_REGION", "") or "eastus2").strip()
-    endpoint = (
-        entry.endpoint
-        or getattr(settings, "AZURE_SPEECH_STT_ENDPOINT", "")
-        or f"https://{region}.stt.speech.microsoft.com"
-    ).rstrip("/")
-    if not key:
-        raise RuntimeError("Azure Speech key is not configured in SuperAdmin → API & Integration.")
-    payload, content_type = _to_azure_wav(content, suffix)
-    locale = _azure_locale(language)
-    url = f"{endpoint}/speech/recognition/conversation/cognitiveservices/v1"
     response = httpx.post(
         url,
-        params={"language": locale, "format": "simple"},
+        params={"language": locale, "format": "detailed"},
         headers={
             "Ocp-Apim-Subscription-Key": key,
             "Content-Type": content_type,
             "Accept": "application/json",
         },
         content=payload,
-        timeout=60,
+        timeout=90,
     )
     if response.status_code >= 400:
         detail = (response.text or response.reason_phrase or "").strip()[:180]
@@ -383,6 +458,9 @@ def _transcribe_azure_speech(
         if nbest and isinstance(nbest[0], dict):
             text = str(nbest[0].get("Display") or nbest[0].get("Lexical") or "").strip()
     if not text:
+        status = str(body.get("RecognitionStatus") or "").strip()
+        if status and status.lower() not in {"success", "successwithpartialresult"}:
+            raise RuntimeError(f"Azure Speech returned no transcript ({status}).")
         raise RuntimeError("Azure Speech returned an empty transcript.")
     duration_ticks = body.get("Duration")
     duration = None
@@ -391,4 +469,76 @@ def _transcribe_azure_speech(
             duration = float(duration_ticks) / 10_000_000
         except (TypeError, ValueError):
             duration = None
-    return text, duration, language or "en-IN", "azure_speech", entry.model_id or "azure-speech"
+    return text, duration
+
+
+def _transcribe_azure_speech(
+    entry: AICatalogEntry,
+    content: bytes,
+    *,
+    suffix: str,
+    language: str | None,
+) -> tuple[str, float | None, str | None, str, str]:
+    key = getattr(settings, "AZURE_SPEECH_KEY", None)
+    region = (entry.region or getattr(settings, "AZURE_SPEECH_REGION", "") or "eastus2").strip()
+    endpoint = (
+        entry.endpoint
+        or getattr(settings, "AZURE_SPEECH_STT_ENDPOINT", "")
+        or f"https://{region}.stt.speech.microsoft.com"
+    ).rstrip("/")
+    if not key:
+        raise RuntimeError("Azure Speech key is not configured in SuperAdmin → API & Integration.")
+    payload, content_type = _to_azure_wav(content, suffix)
+    locale = _azure_locale(language)
+    url = f"{endpoint}/speech/recognition/conversation/cognitiveservices/v1"
+    wav_type = "audio/wav; codecs=audio/pcm; samplerate=16000"
+    duration = _wav_duration_seconds(payload) if content_type.startswith("audio/wav") else None
+
+    # Long answers: Azure short-audio truncates near ~60s — chunk and stitch.
+    if (
+        content_type.startswith("audio/wav")
+        and duration is not None
+        and duration > _AZURE_CHUNK_THRESHOLD
+    ):
+        chunks = _split_pcm_wav(
+            payload,
+            chunk_seconds=_AZURE_CHUNK_SECONDS,
+            overlap_seconds=_AZURE_CHUNK_OVERLAP,
+        )
+        logger.info(
+            "Azure STT chunking %.1fs audio into %s parts for complete transcript",
+            duration,
+            len(chunks),
+        )
+        texts: list[str] = []
+        for index, chunk in enumerate(chunks):
+            try:
+                piece, _ = _azure_recognize_once(
+                    url=url,
+                    key=key,
+                    locale=locale,
+                    payload=chunk,
+                    content_type=wav_type,
+                )
+                texts.append(piece)
+            except Exception:
+                logger.exception("Azure STT chunk %s/%s failed", index + 1, len(chunks))
+        text = _join_transcript_chunks(texts)
+        if not text:
+            raise RuntimeError("Azure Speech returned an empty transcript.")
+        return text, duration, language or "en-IN", "azure_speech", entry.model_id or "azure-speech"
+
+    text, recognized_duration = _azure_recognize_once(
+        url=url,
+        key=key,
+        locale=locale,
+        payload=payload,
+        content_type=content_type,
+    )
+    return (
+        text,
+        duration if duration is not None else recognized_duration,
+        language or "en-IN",
+        "azure_speech",
+        entry.model_id or "azure-speech",
+    )

@@ -10,6 +10,8 @@ class CompanyResponse(BaseModel):
     name: str
     code: str
     logo: str | None = None
+    interview_intro: str | None = None
+    interview_intro_spoken: str | None = None
     status: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -26,6 +28,7 @@ class CompanyCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     code: str = Field(min_length=2, max_length=64)
     logo: str | None = Field(default=None, max_length=512)
+    interview_intro: str | None = Field(default=None, max_length=8000)
     status: str = Field(default="active", pattern="^(active|inactive)$")
 
 
@@ -33,6 +36,7 @@ class CompanyUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     code: str | None = Field(default=None, min_length=2, max_length=64)
     logo: str | None = Field(default=None, max_length=512)
+    interview_intro: str | None = Field(default=None, max_length=8000)
     status: str | None = Field(default=None, pattern="^(active|inactive)$")
 
 

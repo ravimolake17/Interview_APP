@@ -31,12 +31,16 @@ class CompanyRepository:
         code: str,
         logo: str | None = None,
         status: str = "active",
+        interview_intro: str | None = None,
+        interview_intro_spoken: str | None = None,
     ) -> Company:
         row = Company(
             name=name.strip(),
             code=code.strip().upper(),
             logo=(logo or "").strip() or None,
             status=status,
+            interview_intro=(interview_intro or "").strip() or None,
+            interview_intro_spoken=(interview_intro_spoken or "").strip() or None,
         )
         self.db.add(row)
         await self.db.flush()

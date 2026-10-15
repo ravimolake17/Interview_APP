@@ -154,14 +154,16 @@ function playBrowserSpeech(text: string, onSpeakingChange?: (speaking: boolean) 
 
 export type SilenceMonitor = { stop: () => void }
 
-/** Auto-submit when the candidate stops speaking for a short pause. */
+/** Auto-submit when the candidate stops speaking for a pause (not mid-thought). */
 export function startSilenceMonitor(
   stream: MediaStream,
   onSilence: () => void,
-  options?: { silenceMs?: number; threshold?: number },
+  options?: { silenceMs?: number; threshold?: number; minSpeechMs?: number },
 ): SilenceMonitor {
-  const silenceMs = options?.silenceMs ?? 2400
-  const threshold = options?.threshold ?? 0.018
+  // Longer pause so thinking gaps / soft trailing words are not cut early.
+  const silenceMs = options?.silenceMs ?? 6500
+  const threshold = options?.threshold ?? 0.014
+  const minSpeechMs = options?.minSpeechMs ?? 1800
   const ctx = new AudioContext()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 2048
@@ -169,6 +171,9 @@ export function startSilenceMonitor(
   source.connect(analyser)
 
   let speechDetected = false
+  let speechStartedAt = 0
+  let speechAccumulatedMs = 0
+  let lastSpeechAt = 0
   let silenceStart = 0
   let frameId = 0
   let stopped = false
@@ -185,11 +190,19 @@ export function startSilenceMonitor(
     const rms = Math.sqrt(sum / data.length)
     const now = Date.now()
     if (rms > threshold) {
+      if (!speechDetected) speechStartedAt = now
       speechDetected = true
+      if (lastSpeechAt) speechAccumulatedMs += Math.min(80, now - lastSpeechAt)
+      lastSpeechAt = now
       silenceStart = 0
     } else if (speechDetected) {
-      if (!silenceStart) silenceStart = now
-      else if (now - silenceStart >= silenceMs) {
+      const spokenLongEnough =
+        speechAccumulatedMs >= minSpeechMs || (speechStartedAt > 0 && now - speechStartedAt >= minSpeechMs)
+      if (!spokenLongEnough) {
+        silenceStart = 0
+      } else if (!silenceStart) {
+        silenceStart = now
+      } else if (now - silenceStart >= silenceMs) {
         stopped = true
         onSilence()
         return

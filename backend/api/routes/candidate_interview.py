@@ -116,6 +116,17 @@ async def _company_display_name(db: AsyncSession, candidate) -> str:
     return (company.name if company and company.name else "RR Parkon").strip() or "RR Parkon"
 
 
+async def _company_intro_spoken(db: AsyncSession, candidate) -> str:
+    if not getattr(candidate, "company_id", None):
+        return ""
+    company = await CompanyRepository(db).get_by_id(int(candidate.company_id))
+    if not company:
+        return ""
+    return (
+        (company.interview_intro_spoken or company.interview_intro or "").strip()
+    )
+
+
 @router.get("/sessions/{session_id}/runtime")
 async def get_room_runtime(
     session_id: str,
@@ -197,6 +208,7 @@ async def start_room_ai(
             company_name=company_name,
             role=candidate.job_position or "",
             interviewer_name=primary_interviewer_name(),
+            company_intro=await _company_intro_spoken(db, candidate),
         )
 
     return response

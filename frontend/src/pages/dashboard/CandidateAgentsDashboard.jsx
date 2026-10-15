@@ -2311,7 +2311,7 @@ export default function CandidateAgentsDashboard() {
                           </span>
                         </div>
                         <p className="text-sm text-col font-medium whitespace-pre-wrap">{row.question_text || '—'}</p>
-                        <p className="text-xs text-col">
+                        <p className="text-xs text-col whitespace-pre-wrap break-words">
                           <span className="font-semibold">Answer: </span>
                           {row.answer_text || 'Not answered'}
                         </p>

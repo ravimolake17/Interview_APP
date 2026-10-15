@@ -334,14 +334,18 @@ class SuperAdminDataService:
 
     async def create_department(self, payload: DepartmentCreate) -> dict[str, Any]:
         repo = DepartmentRepository(self.db)
-        if await repo.get_by_name(payload.name):
+        if not payload.company_id:
+            raise HTTPException(status_code=400, detail="company_id is required.")
+        if await repo.get_by_name(payload.name, company_id=payload.company_id):
             raise HTTPException(status_code=409, detail="A department with this name already exists.")
         try:
             row = await repo.create(
                 name=payload.name,
                 description=payload.description,
+                interview_brief=payload.interview_brief,
                 sort_order=payload.sort_order,
                 is_active=payload.is_active,
+                company_id=payload.company_id,
             )
         except IntegrityError as exc:
             await self.db.rollback()
@@ -373,6 +377,8 @@ class SuperAdminDataService:
             row.name = data["name"].strip()
         if "description" in data:
             row.description = (data["description"] or "").strip() or None
+        if "interview_brief" in data:
+            row.interview_brief = (data["interview_brief"] or "").strip() or None
         if "is_active" in data and data["is_active"] is not None:
             row.is_active = data["is_active"]
         if "sort_order" in data and data["sort_order"] is not None:

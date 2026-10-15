@@ -175,8 +175,8 @@ def oral_rules_message() -> str:
         "The multiple-choice section is complete. Now we begin the oral interview. "
         "I will ask you one question at a time. Please listen carefully, then answer "
         "naturally using your microphone. When you stop speaking, your answer will be "
-        "captured automatically. At the end, you will get time to share feedback and "
-        "ask me questions about the role. Let's begin."
+        "captured automatically. At the end, I will share a brief overview of the role, "
+        "then you can ask about the role, department, or company. Let's begin."
     )
 
 
@@ -186,6 +186,7 @@ def intro_message(
     company_name: str,
     role: str,
     interviewer_name: str = "",
+    company_intro: str = "",
 ) -> str:
     name = first_name.strip() or "there"
     company = company_name.strip() or "RR Parkon"
@@ -196,10 +197,16 @@ def intro_message(
         if persona
         else f"I'm your AI interviewer today{role_phrase}."
     )
+    about = (company_intro or "").strip()
+    if not about:
+        about = (
+            f"{company} is part of RR Global. "
+            "We build intelligent recruitment and enterprise software solutions."
+        )
     return (
-        f"Hello {name}, welcome to {company} — part of RR Global. "
+        f"Hello {name}, welcome to {company}. "
         f"{who} "
-        "RR Global builds intelligent recruitment and enterprise software solutions. "
+        f"{about} "
         "This interview is confidential and proctored to ensure fairness for every candidate."
     )
 

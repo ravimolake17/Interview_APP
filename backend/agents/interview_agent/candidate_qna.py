@@ -33,6 +33,17 @@ _UNKNOWN_REPLY = (
     "If you have a question about the role or next steps, I'm happy to help."
 )
 
+_HARD_UNKNOWN = re.compile(
+    r"\b("
+    r"salary|ctc|compensation|pay scale|bond|notice period|"
+    r"office address|seating|shift (?:timing|roster)|named employees|"
+    r"manager(?:'s)? name|who (?:is|are) (?:the )?(?:manager|lead|boss|head)|"
+    r"team size|how many (?:people|members|engineers|employees)|headcount|"
+    r"org chart|reporting line|reporting structure|who (?:do|would) i report"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _CLOSING_PATTERNS = re.compile(
     r"\b(no questions?|nothing else|that's all|thats all|i'm done|im done|"
     r"no thanks|nothing to ask|i'm good|im good|all good|no more|"
@@ -61,7 +72,7 @@ _UNKNOWN_INTERNAL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_QNA_SYSTEM = """You are an AI interviewer wrapping up a job interview for RR Parkon, part of RR Global.
+_QNA_SYSTEM = """You are an AI interviewer wrapping up a job interview.
 The candidate may share feedback or ask questions.
 
 Return JSON only:
@@ -73,18 +84,34 @@ Return JSON only:
 
 Set closing=true when the candidate is finished, has no questions, or only says thank you.
 
-You do NOT have internal company facts. Never invent them.
-Unknown (do not guess): team structure, headcount, reporting lines, named managers,
-salaries, benefits numbers, office seating, shifts, or unannounced plans.
-If asked those, allowed=true, say you do not have that information and HR can follow up.
+REFERENCE TEXTS below are the source of truth for company, department, and role answers.
+When the candidate asks about the company, department, role, or responsibilities,
+answer using those texts. Paraphrase naturally; do not invent facts beyond them.
 
-Safe topics: the role in general, the interview process, and that HR will share next steps.
+Still unknown (do not guess): salaries, CTC, named managers, exact headcount,
+reporting lines, office seating, shifts, or unannounced plans — say HR can follow up.
+
+Safe topics: role responsibilities (from reference), department overview (from reference),
+company intro (from reference), the interview process, and that HR shares next steps.
 
 DECLINE (allowed=false): politics, religion, caste, race, gender attacks, adult content,
 illegal activity, hacking, confidential internals, medical/legal advice, or cheating.
 
 If declining, politely refuse and offer to talk about the role or next steps instead.
 """
+
+
+def build_qna_opening(*, role_summary: str = "") -> str:
+    """End-of-questions opener; includes role overview when available."""
+    summary = (role_summary or "").strip()
+    if summary:
+        return (
+            f"Those were my interview questions. As promised, here is a brief overview of the role: "
+            f"{summary} "
+            "You now have time to share feedback or ask about the role, the department, "
+            "the company, or next steps. If you have no questions, just say you are done."
+        )
+    return QNA_OPENING
 
 
 def is_closing_utterance(text: str) -> bool:
@@ -121,11 +148,47 @@ def qna_prompt_question(text: str, *, turn: int = 0, closing: bool = False) -> d
     }
 
 
+def _reference_block(
+    *,
+    role_summary: str,
+    department_name: str,
+    department_brief: str,
+    company_intro: str,
+) -> str:
+    parts = [
+        f"Role overview: {role_summary or '(none provided)'}",
+        f"Department ({department_name or 'n/a'}): {department_brief or '(none provided)'}",
+        f"Company intro: {company_intro or '(none provided)'}",
+    ]
+    return "\n".join(parts)
+
+
+def _fallback_from_briefs(
+    text: str,
+    *,
+    role_summary: str,
+    department_brief: str,
+    company_intro: str,
+) -> str | None:
+    lowered = text.lower()
+    if any(k in lowered for k in ("role", "responsibilit", "jd", "job description", "day to day", "day-to-day")) and role_summary:
+        return role_summary
+    if any(k in lowered for k in ("department", "team", "org")) and department_brief:
+        return department_brief
+    if any(k in lowered for k in ("company", "about us", "organisation", "organization")) and company_intro:
+        return company_intro
+    return None
+
+
 def generate_candidate_qna_reply(
     candidate_text: str,
     *,
     job_position: str = "",
     turn: int = 1,
+    role_summary: str = "",
+    department_brief: str = "",
+    department_name: str = "",
+    company_intro: str = "",
 ) -> dict[str, Any]:
     """Classify the candidate utterance and return a spoken reply."""
     text = (candidate_text or "").strip()
@@ -135,8 +198,15 @@ def generate_candidate_qna_reply(
     if looks_controversial(text):
         return {"closing": False, "allowed": False, "reply": _DECLINE_REPLY}
 
-    if looks_unknown_internal(text):
+    if _HARD_UNKNOWN.search(text):
         return {"closing": False, "allowed": True, "reply": _UNKNOWN_REPLY}
+
+    refs = _reference_block(
+        role_summary=role_summary,
+        department_name=department_name,
+        department_brief=department_brief,
+        company_intro=company_intro,
+    )
 
     if llama_available():
         try:
@@ -145,6 +215,7 @@ def generate_candidate_qna_reply(
                 (
                     f"Job position: {job_position or 'the open role'}\n"
                     f"Q&A turn: {turn} of {MAX_QNA_TURNS}\n"
+                    f"REFERENCE TEXTS:\n{refs}\n\n"
                     f"Candidate said: {text}"
                 ),
                 temperature=0.3,
@@ -162,11 +233,20 @@ def generate_candidate_qna_reply(
                     "Thank you. If you have another question about the role or next steps, "
                     "please go ahead. Otherwise, say you are done."
                 )
-            if looks_unknown_internal(text):
+            if _HARD_UNKNOWN.search(text):
                 reply = _UNKNOWN_REPLY
             return {"closing": closing, "allowed": allowed, "reply": reply}
         except Exception:
             logger.exception("Candidate Q&A LLM reply failed; using fallback.")
+
+    brief_reply = _fallback_from_briefs(
+        text,
+        role_summary=role_summary,
+        department_brief=department_brief,
+        company_intro=company_intro,
+    )
+    if brief_reply:
+        return {"closing": False, "allowed": True, "reply": brief_reply}
 
     return {
         "closing": False,

@@ -40,6 +40,7 @@ class DepartmentRepository:
         *,
         name: str,
         description: str | None = None,
+        interview_brief: str | None = None,
         sort_order: int = 0,
         is_active: bool = True,
         company_id: int,
@@ -48,6 +49,7 @@ class DepartmentRepository:
             company_id=company_id,
             name=name.strip(),
             description=(description or "").strip() or None,
+            interview_brief=(interview_brief or "").strip() or None,
             sort_order=sort_order,
             is_active=is_active,
         )

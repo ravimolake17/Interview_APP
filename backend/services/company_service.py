@@ -29,12 +29,24 @@ class CompanyService:
         code: str,
         logo: str | None = None,
         status: str = CompanyStatus.ACTIVE,
+        interview_intro: str | None = None,
         template_company_id: int | None = None,
     ) -> Company:
+        from services.interview_brief_service import shorten_company_intro
+
         existing = await self.repo.get_by_code(code)
         if existing:
             raise ValueError("A company with this code already exists.")
-        company = await self.repo.create(name=name, code=code, logo=logo, status=status)
+        intro = (interview_intro or "").strip() or None
+        spoken = shorten_company_intro(intro or "", company_name=name) if intro else None
+        company = await self.repo.create(
+            name=name,
+            code=code,
+            logo=logo,
+            status=status,
+            interview_intro=intro,
+            interview_intro_spoken=spoken or None,
+        )
         await self._clone_departments(company.id, template_company_id)
         await self._clone_settings(company.id, template_company_id)
         return company
@@ -47,7 +59,10 @@ class CompanyService:
         code: str | None = None,
         logo: str | None = None,
         status: str | None = None,
+        interview_intro: str | None = ...,
     ) -> Company:
+        from services.interview_brief_service import shorten_company_intro
+
         if name is not None:
             company.name = name.strip()
         if code is not None:
@@ -59,6 +74,12 @@ class CompanyService:
             company.logo = logo.strip() or None
         if status is not None:
             company.status = status
+        if interview_intro is not ...:
+            intro = (interview_intro or "").strip() or None
+            company.interview_intro = intro
+            company.interview_intro_spoken = (
+                shorten_company_intro(intro, company_name=company.name) if intro else None
+            )
         await self.db.flush()
         return company
 
@@ -74,6 +95,7 @@ class CompanyService:
                     company_id=company_id,
                     name=row.name,
                     description=row.description,
+                    interview_brief=getattr(row, "interview_brief", None),
                     is_active=row.is_active,
                     sort_order=row.sort_order,
                 )
