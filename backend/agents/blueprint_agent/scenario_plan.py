@@ -42,8 +42,24 @@ def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
 
 
+_VAGUE_LABELS = {
+    "languages",
+    "language",
+    "skills",
+    "tools",
+    "algorithms",
+    "technology",
+    "technologies",
+    "programming",
+    "software",
+    "machine learning algorithms",
+    "core skills",
+}
+
+
 def _short_label(value: Any, *, max_words: int = 6) -> str:
-    text = _clean(value).strip(" ,;|.-")
+    text = _clean(value)
+    text = re.sub(r"^[#>*\-\d.]+\s*", "", text).strip(" ,;|.-?#*")
     if not text:
         return ""
     first = re.split(r"[.!?;|\n]\s*", text)[0].strip()
@@ -67,6 +83,8 @@ def _short_label(value: Any, *, max_words: int = 6) -> str:
             "looking for",
         )
     ):
+        return ""
+    if lower in _VAGUE_LABELS:
         return ""
     if len(first) > 64:
         return ""
@@ -201,12 +219,13 @@ def build_deterministic_question_plan(
                 probe: ProbeType = "motivation"
             elif cat.category_id == "education_courses_questions":
                 probe = _EDU_PROBES[i % len(_EDU_PROBES)]
-                evidence = (cat_resume[i % len(cat_resume)] if cat_resume else "") or (
-                    projects[project_i % len(projects)] if projects else ""
+                # Prefer education/course labels only — never reuse project titles here.
+                evidence = (
+                    cat_resume[i % len(cat_resume)]
+                    if cat_resume
+                    else (cat_jd[i % len(cat_jd)] if cat_jd else "your coursework")
                 )
-                if projects:
-                    project_i += 1
-                skill = evidence or (cat_jd[0] if cat_jd else "")
+                skill = evidence if evidence != "your coursework" else ""
             elif cat.category_id == "project_related_questions":
                 probe = _PROJECT_PROBES[probe_i % len(_PROJECT_PROBES)]
                 probe_i += 1

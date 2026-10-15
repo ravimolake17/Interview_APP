@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import Any
 
@@ -76,33 +77,35 @@ def _template_questions_from_plan(
                 SCENARIO_MAX_WORDS,
             )
         elif slot.probe_type == "scale":
-            topic = skill or "your system"
+            topic = skill or sanitize_topic(slot.evidence) or "your service"
             text = shorten_question(
-                f"If demand for {topic} suddenly jumped ten times, how would you keep it stable?",
+                f"If {topic} suddenly had to handle a ten-times traffic spike, "
+                f"how would you protect latency, memory, and error rates?",
                 SCENARIO_MAX_WORDS,
             )
         elif slot.probe_type == "failure":
-            topic = skill or "that work"
+            topic = skill or sanitize_topic(slot.evidence) or "that system"
             text = shorten_question(
-                f"When {topic} failed or almost failed, what broke and how did you recover?",
+                f"Describe a production failure involving {topic}: what broke first, "
+                f"how did you diagnose it, and what did you change afterward?",
                 SCENARIO_MAX_WORDS,
             )
         elif slot.probe_type == "tradeoff":
-            topic = skill or "the design"
+            topic = skill or sanitize_topic(slot.evidence) or "the design"
             text = shorten_question(
-                f"What trade-off did you accept on {topic}, and why was that the right call?",
+                f"On {topic}, what important trade-off did you choose, and what did you give up?",
                 SCENARIO_MAX_WORDS,
             )
         elif slot.probe_type == "change":
-            topic = skill or slot.evidence or "that approach"
+            topic = skill or sanitize_topic(slot.evidence) or "that approach"
             text = shorten_question(
-                f"If you rebuilt {topic} today, what would you change first, and why?",
+                f"If you had to redesign {topic} from scratch next month, what would you change first?",
                 SCENARIO_MAX_WORDS,
             )
         elif slot.category_id == "education_courses_questions":
-            topic = skill or "your coursework"
+            topic = skill or "your strongest coursework"
             text = shorten_question(
-                f"How have you applied {topic} on real work, not only in class?",
+                f"Which part of {topic} do you actually use on the job, and where do you still feel a gap?",
                 SCENARIO_MAX_WORDS,
             )
         else:
@@ -153,6 +156,81 @@ def _template_questions_from_plan(
     return questions
 
 
+def _clean_plan_slots(slots: list[QuestionPlanSlot]) -> list[QuestionPlanSlot]:
+    cleaned: list[QuestionPlanSlot] = []
+    for slot in slots:
+        skill = sanitize_topic(slot.skill) or ""
+        evidence = sanitize_topic(slot.evidence) or ""
+        intent = re.sub(r"^[#>*\-\d.]+\s*", "", (slot.scenario_intent or "").strip())
+        intent = re.sub(r"\s+", " ", intent).strip()
+        cleaned.append(
+            slot.model_copy(
+                update={
+                    "skill": skill,
+                    "evidence": evidence,
+                    "scenario_intent": intent or slot.scenario_intent,
+                }
+            )
+        )
+    return cleaned
+
+
+def _call_llm_question_batch(
+    batch: list[QuestionPlanSlot],
+    *,
+    job_title: str,
+    role_family: str,
+    resume_context: dict[str, str],
+) -> list[dict[str, Any]]:
+    preview = [
+        {
+            "order": s.order,
+            "category_id": s.category_id,
+            "difficulty": s.difficulty,
+            "skill": s.skill,
+            "evidence": s.evidence,
+            "probe_type": s.probe_type,
+            "scenario_intent": s.scenario_intent,
+        }
+        for s in batch
+    ]
+    system = (
+        "You are a hiring manager with 15 years of experience running live technical interviews. "
+        "Write professional spoken questions like ChatGPT would for a real interview — specific, "
+        "scenario-based, and grounded in the candidate's skills/projects — NOT generic templates. "
+        "For EACH slot return exactly one question_text. "
+        "Hard rules:\n"
+        "- One question, one '?', max 42 words, natural speech.\n"
+        "- Never use resume bio/objective wording; never markdown (#).\n"
+        "- Intro category: motivation/background only (no tool names).\n"
+        "- Skills/projects: invent a concrete scenario matching probe_type "
+        "(scale = burst load / large files / concurrency; failure = outage/bug; "
+        "tradeoff = design choice; ownership = what they personally built; "
+        "change = what they'd rebuild).\n"
+        "- Example quality: 'If your OCR API received 1000 PDFs in one minute, "
+        "how would you keep memory and latency under control?' "
+        "Avoid: 'Talk me through a time you used FastAPI.'\n"
+        "- Keep the same order values as the slots.\n"
+        "Return JSON only: {\"questions\":[{\"order\":1,\"question_text\":\"...\","
+        "\"intent\":\"...\",\"follow_up_hints\":[\"...\"],\"skill_tags\":[\"...\"]}]}"
+    )
+    user = (
+        f"Job title: {job_title or resume_context.get('job_position') or 'role'}\n"
+        f"Role family: {role_family or 'general'}\n"
+        f"Skills: {resume_context.get('skills') or 'n/a'}\n"
+        f"JD requirements: {resume_context.get('jd_requirements') or 'n/a'}\n"
+        f"JD excerpt: {(resume_context.get('jd_text') or 'n/a')[:700]}\n"
+        f"Resume context (planning only — never read aloud): "
+        f"{(resume_context.get('resume_summary') or 'n/a')[:500]}\n\n"
+        f"Slots ({len(batch)}):\n{preview}"
+    )
+    data = call_llama_json(system, user, temperature=0.5, max_tokens=2200)
+    refined = data.get("questions") if isinstance(data, dict) else None
+    if not isinstance(refined, list):
+        return []
+    return [item for item in refined if isinstance(item, dict)]
+
+
 def _llm_spoken_questions_from_plan(
     slots: list[QuestionPlanSlot],
     *,
@@ -160,71 +238,74 @@ def _llm_spoken_questions_from_plan(
     role_family: str,
     resume_context: dict[str, str],
 ) -> list[InterviewQuestion] | None:
-    if not llama_available() or not slots:
+    if not slots:
+        return None
+    if not llama_available():
+        logger.warning(
+            "Agent 4 LLM unavailable (configure Azure OpenAI or GROQ_API_KEY in SuperAdmin); "
+            "falling back to templates"
+        )
         return None
 
-    preview = [
-        {
-            "order": s.order,
-            "category_id": s.category_id,
-            "category_name": s.category_name,
-            "difficulty": s.difficulty,
-            "skill": s.skill,
-            "evidence": s.evidence,
-            "probe_type": s.probe_type,
-            "scenario_intent": s.scenario_intent,
-            "estimated_seconds": s.estimated_seconds,
-        }
-        for s in slots
-    ]
-    system = (
-        "You are a senior interviewer speaking live on a voice call. "
-        "For EACH plan slot, write ONE spoken interview question from scenario_intent and probe_type. "
-        "Rules: "
-        "1) One question, one question mark, max 42 words, conversational. "
-        "2) Never turn a resume objective/summary/profile sentence into the question. "
-        "3) Never start with Motivated/Passionate/Dedicated/graduate with… bios. "
-        "4) Introductory slots: background or motivation only — no tools/tech names. "
-        "5) For probe_type=scale: ask a concrete pressure scenario fitted to the skill and role_family "
-        "(software: burst load, large files, concurrency; data: pipeline volume; ops: incident spike; "
-        "non_tech: deadline/volume/stakeholder pressure). "
-        "6) Mix ownership, failure, trade-off, and redesign — do not write generic 'tell me about X' only. "
-        "7) Keep the same count, order, category_id, and difficulty as the plan. "
-        "8) skill_tags: short labels only (1-4 words). "
-        "Return JSON: {\"questions\":[{\"order\":1,\"question_text\":\"...\","
-        "\"intent\":\"...\",\"follow_up_hints\":[\"...\"],\"skill_tags\":[\"...\"]}] }"
-    )
-    user = (
-        f"Job title: {job_title or resume_context.get('job_position') or 'role'}\n"
-        f"Role family: {role_family or 'general'}\n"
-        f"Skills: {resume_context.get('skills') or 'n/a'}\n"
-        f"JD requirements: {resume_context.get('jd_requirements') or 'n/a'}\n"
-        f"JD excerpt: {(resume_context.get('jd_text') or 'n/a')[:500]}\n"
-        f"Resume context (do NOT read aloud as a question): "
-        f"{(resume_context.get('resume_summary') or 'n/a')[:400]}\n\n"
-        f"Question plan slots:\n{preview}"
-    )
+    slots = _clean_plan_slots(slots)
+    by_order: dict[int, dict[str, Any]] = {}
+    batch_size = 4
     try:
-        data = call_llama_json(system, user, temperature=0.45, max_tokens=3500)
-        refined = data.get("questions") if isinstance(data, dict) else None
-        if not isinstance(refined, list) or not refined:
+        for start in range(0, len(slots), batch_size):
+            batch = slots[start : start + batch_size]
+            try:
+                items = _call_llm_question_batch(
+                    batch,
+                    job_title=job_title,
+                    role_family=role_family,
+                    resume_context=resume_context,
+                )
+            except Exception:
+                logger.exception(
+                    "Agent 4 LLM batch failed for orders %s-%s; retrying once",
+                    batch[0].order,
+                    batch[-1].order,
+                )
+                items = _call_llm_question_batch(
+                    batch,
+                    job_title=job_title,
+                    role_family=role_family,
+                    resume_context=resume_context,
+                )
+            for item in items:
+                try:
+                    order = int(item.get("order") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if order:
+                    by_order[order] = item
+        if len(by_order) < max(1, len(slots) // 2):
+            logger.warning(
+                "Agent 4 LLM returned too few questions (%s/%s); using template fallback",
+                len(by_order),
+                len(slots),
+            )
             return None
-        by_order = {
-            int(item.get("order") or 0): item
-            for item in refined
-            if isinstance(item, dict)
-        }
+
         fallback = _template_questions_from_plan(slots, role=job_title)
         fallback_by_order = {q.order: q for q in fallback}
         out: list[InterviewQuestion] = []
         used: set[str] = set()
+        llm_used = 0
         for slot in slots:
             seed = fallback_by_order.get(slot.order)
             item = by_order.get(slot.order) or {}
+            raw_text = str(item.get("question_text") or "").strip()
+            raw_text = re.sub(r"^[#>*\-\d.]+\s*", "", raw_text)
             text = shorten_question(
-                str(item.get("question_text") or (seed.question_text if seed else "")).strip(),
+                raw_text or (seed.question_text if seed else ""),
                 SCENARIO_MAX_WORDS,
             )
+            from_llm = bool(raw_text) and is_spoken_interview_question(text)
+            if from_llm:
+                llm_used += 1
+            else:
+                text = seed.question_text if seed else text
             tags = [
                 tag
                 for tag in (
@@ -256,7 +337,14 @@ def _llm_spoken_questions_from_plan(
                 text = seed.question_text if seed else text
             key = _question_key(text)
             if not key or key in used:
-                text = seed.question_text if seed else text
+                alt = shorten_question(
+                    f"{text.rstrip('?')} — focusing on {sanitize_topic(slot.skill or slot.evidence) or 'this role'}?",
+                    SCENARIO_MAX_WORDS,
+                )
+                if is_spoken_interview_question(alt) and _question_key(alt) not in used:
+                    text = alt
+                elif seed:
+                    text = seed.question_text
                 key = _question_key(text) or f"order-{slot.order}"
             used.add(key)
             out.append(
@@ -276,10 +364,13 @@ def _llm_spoken_questions_from_plan(
                 )
             )
         logger.info(
-            "Agent 4 generated %s spoken questions from scenario plan with LLM (%s)",
+            "Agent 4 generated questions via LLM (%s/%s from model %s)",
+            llm_used,
             len(out),
             llama_model_id(),
         )
+        if llm_used == 0:
+            return None
         return out
     except Exception:
         logger.exception("Agent 4 LLM question generation from plan failed")
@@ -312,7 +403,11 @@ def generate_questions_with_llama(
         )
         if llm_questions:
             return llm_questions
-        logger.info("Agent 4 using scenario-plan template fallback (%s slots)", len(slots))
+        logger.warning(
+            "Agent 4 using template fallback for %s slots (LLM missing or failed). "
+            "Check SuperAdmin chat model / GROQ_API_KEY / Azure OpenAI.",
+            len(slots),
+        )
         return _template_questions_from_plan(slots, role=role)
 
     # Legacy blueprints without question_plan.

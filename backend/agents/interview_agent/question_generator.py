@@ -66,9 +66,37 @@ def looks_like_resume_summary(text: str) -> bool:
     return False
 
 
+_VAGUE_TOPICS = {
+    "languages",
+    "language",
+    "skills",
+    "skill",
+    "tools",
+    "tool",
+    "algorithms",
+    "algorithm",
+    "technology",
+    "technologies",
+    "programming",
+    "software",
+    "computer science",
+    "machine learning algorithms",
+    "deep learning",
+    "ai",
+    "ml",
+    "core skills",
+    "your project",
+    "your coursework",
+    "the role",
+}
+
+
 def sanitize_topic(text: str, *, fallback: str = "") -> str:
     """Keep only a short skill/project label for templates and skill_tags."""
-    cleaned = re.sub(r"\s+", " ", (text or "").strip()).strip(" ,;|.-?")
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    # Strip markdown headings / bullets copied from resume section titles.
+    cleaned = re.sub(r"^[#>*\-\d.]+\s*", "", cleaned)
+    cleaned = cleaned.strip(" ,;|.-?#*")
     if not cleaned:
         return fallback
     first = re.split(r"[.!?;|\n]\s*", cleaned)[0].strip()
@@ -76,13 +104,16 @@ def sanitize_topic(text: str, *, fallback: str = "") -> str:
         if sep in first:
             left = first.split(sep, 1)[0].strip()
             if left and not looks_like_resume_summary(left) and len(left.split()) <= _MAX_TOPIC_WORDS:
-                return left
-            first = left or first
+                first = left
+            else:
+                first = left or first
             break
     words = first.split()
     if len(words) > _MAX_TOPIC_WORDS:
         first = " ".join(words[:_MAX_TOPIC_WORDS]).rstrip(",;:")
     if looks_like_resume_summary(first):
+        return fallback
+    if first.casefold() in _VAGUE_TOPICS:
         return fallback
     return first
 

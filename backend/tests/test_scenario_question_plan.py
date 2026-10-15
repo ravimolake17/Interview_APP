@@ -164,56 +164,57 @@ def test_agent4_prefers_llm_spoken_questions_from_plan():
         enriched = enrich_blueprint_with_scenario_plan(blueprint, None)
     payload = enriched.model_dump(mode="json")
 
-    llm_payload = {
-        "questions": [
-            {
-                "order": 1,
-                "question_text": "What about this AI Engineer role made you want to interview with us?",
-                "intent": "motivation",
-                "follow_up_hints": ["Listen for clarity"],
-                "skill_tags": [],
-            },
-            {
-                "order": 2,
-                "question_text": (
-                    "If your OCR service suddenly received a thousand PDFs at once, "
-                    "how would you keep latency and errors under control?"
-                ),
-                "intent": "scale OCR",
-                "follow_up_hints": ["Queues"],
-                "skill_tags": ["OCR"],
-            },
-            {
-                "order": 3,
-                "question_text": (
-                    "When OCR accuracy dropped in production, what failed first and how did you recover?"
-                ),
-                "intent": "failure OCR",
-                "follow_up_hints": ["Monitoring"],
-                "skill_tags": ["OCR"],
-            },
-            {
-                "order": 4,
-                "question_text": (
-                    "On the PDF Pipeline work, what would you change first if a single file was two gigabytes?"
-                ),
-                "intent": "scale project",
-                "follow_up_hints": ["Memory"],
-                "skill_tags": ["PDF Pipeline"],
-            },
-            {
-                "order": 5,
-                "question_text": "How have you applied your MCA coursework on real OCR or document work?",
-                "intent": "education",
-                "follow_up_hints": ["Transfer"],
-                "skill_tags": ["MCA"],
-            },
-        ]
-    }
+    def _fake_llm(system, user, **kwargs):
+        return {
+            "questions": [
+                {
+                    "order": 1,
+                    "question_text": "What about this AI Engineer role made you want to interview with us?",
+                    "intent": "motivation",
+                    "follow_up_hints": ["Listen for clarity"],
+                    "skill_tags": [],
+                },
+                {
+                    "order": 2,
+                    "question_text": (
+                        "If your OCR service suddenly received a thousand PDFs at once, "
+                        "how would you keep latency and errors under control?"
+                    ),
+                    "intent": "scale OCR",
+                    "follow_up_hints": ["Queues"],
+                    "skill_tags": ["OCR"],
+                },
+                {
+                    "order": 3,
+                    "question_text": (
+                        "When OCR accuracy dropped in production, what failed first and how did you recover?"
+                    ),
+                    "intent": "failure OCR",
+                    "follow_up_hints": ["Monitoring"],
+                    "skill_tags": ["OCR"],
+                },
+                {
+                    "order": 4,
+                    "question_text": (
+                        "On the PDF Pipeline work, what would you change first if a single file was two gigabytes?"
+                    ),
+                    "intent": "scale project",
+                    "follow_up_hints": ["Memory"],
+                    "skill_tags": ["PDF Pipeline"],
+                },
+                {
+                    "order": 5,
+                    "question_text": "How have you applied your MCA coursework on real OCR or document work?",
+                    "intent": "education",
+                    "follow_up_hints": ["Transfer"],
+                    "skill_tags": ["MCA"],
+                },
+            ]
+        }
 
     with (
         patch("agents.interview_agent.adaptive.llama_available", return_value=True),
-        patch("agents.interview_agent.adaptive.call_llama_json", return_value=llm_payload),
+        patch("agents.interview_agent.adaptive.call_llama_json", side_effect=_fake_llm),
     ):
         questions = generate_questions_with_llama(
             payload,
@@ -226,4 +227,15 @@ def test_agent4_prefers_llm_spoken_questions_from_plan():
     assert "thousand pdfs" in joined or "thousand" in joined
     assert "two gigabytes" in joined or "gigabyte" in joined
     assert "motivated and research" not in joined
+    assert "##" not in joined
     assert all(is_spoken_interview_question(q.question_text) for q in questions)
+
+
+def test_sanitize_strips_markdown_heading_and_vague_topics():
+    from agents.interview_agent.question_generator import sanitize_topic
+
+    cleaned = sanitize_topic("## Deep Learning-Based 3D Dental Mesh Segmentation")
+    assert cleaned.startswith("Deep Learning")
+    assert "#" not in cleaned
+    assert sanitize_topic("Languages") == ""
+    assert sanitize_topic("Machine Learning Algorithms") == ""
