@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import DuplicateJobDialog from '../components/ui/DuplicateJobDialog';
 import { createJob as createJobApi } from '../services/api';
 import { runBatchScreening, uploadJobDescription } from '../services/screeningApi';
 import { mapEvaluationToScreeningResult } from '../utils/hrMappers';
@@ -26,6 +27,13 @@ import { useAuth } from './AuthContext';
 
 const ScreeningQueueContext = createContext(null);
 
+class JdStoreCancelledError extends Error {
+  constructor(message = 'JD save cancelled — screening was not started.') {
+    super(message);
+    this.name = 'JdStoreCancelledError';
+  }
+}
+
 function newJobId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -33,7 +41,7 @@ function newJobId() {
   return `screen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function prepareJdWhenProcessing(job, jobsCatalog) {
+async function prepareJdWhenProcessing(job, jobsCatalog, askDuplicateDecision) {
   if (job.jdMode === 'saved') {
     return { preparedJd: null, selectedJob: job.selectedJob || null };
   }
@@ -62,7 +70,7 @@ async function prepareJdWhenProcessing(job, jobsCatalog) {
     const preferred = parsed.preferred_skills?.normalized || parsed.preferred_skills?.raw || [];
     const skills = [...new Set([...(required || []), ...(preferred || [])].map(String))];
     const payload = {
-      title: nextAvailableJobTitle(baseTitle, jobsCatalog),
+      title: baseTitle,
       department: parsed.department || 'Hiring',
       location: parsed.location || 'India',
       description: preparedJd.jd_text || job.jdText || '',
@@ -71,23 +79,39 @@ async function prepareJdWhenProcessing(job, jobsCatalog) {
       jd_file_url: preparedJd.stored_file_url,
       jd_text: preparedJd.jd_text || job.jdText || undefined,
       parsed_jd: preparedJd.parsed_jd,
-      on_duplicate: 'rename',
+      on_duplicate: 'error',
     };
     try {
       await createJobApi(payload, { timeout: 120000 });
     } catch (error) {
       const dup = duplicateJobDetail(error);
-      if (dup) {
+      if (!dup) throw error;
+
+      const decision = await askDuplicateDecision({
+        existing: dup.existing,
+        reason: dup.reason,
+        suggestedTitle: nextAvailableJobTitle(dup.existing?.title || baseTitle, jobsCatalog),
+      });
+
+      if (!decision || decision.action === 'cancel') {
+        throw new JdStoreCancelledError();
+      }
+      if (decision.action === 'replace') {
         await createJobApi(
-          {
-            ...payload,
-            title: nextAvailableJobTitle(dup.existing?.title || baseTitle, jobsCatalog),
-            on_duplicate: 'rename',
-          },
+          { ...payload, title: dup.existing?.title || baseTitle, on_duplicate: 'replace' },
+          { timeout: 120000 },
+        );
+      } else if (decision.action === 'rename') {
+        const renamed = String(decision.title || '').trim();
+        if (!renamed) {
+          throw new Error('Enter a new job title to rename this JD.');
+        }
+        await createJobApi(
+          { ...payload, title: renamed, on_duplicate: 'rename' },
           { timeout: 120000 },
         );
       } else {
-        throw error;
+        throw new JdStoreCancelledError();
       }
     }
   }
@@ -107,11 +131,32 @@ export function ScreeningQueueProvider({ children }) {
 
   const [jobs, setJobs] = useState(() => restoredRef.current.jobs || []);
   const [panelOpen, setPanelOpen] = useState(() => Boolean(restoredRef.current.panelOpen));
+  const [jdDuplicatePrompt, setJdDuplicatePrompt] = useState(null);
   const activeJobIdRef = useRef(null);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
   const catalogRef = useRef(catalogJobs);
   catalogRef.current = catalogJobs;
+  const jdDuplicateResolverRef = useRef(null);
+
+  const askDuplicateDecision = useCallback((prompt) => {
+    if (jdDuplicateResolverRef.current) {
+      jdDuplicateResolverRef.current({ action: 'cancel' });
+      jdDuplicateResolverRef.current = null;
+    }
+    return new Promise((resolve) => {
+      jdDuplicateResolverRef.current = resolve;
+      setJdDuplicatePrompt(prompt);
+      setPanelOpen(true);
+    });
+  }, []);
+
+  const resolveDuplicateDecision = useCallback((decision) => {
+    const resolve = jdDuplicateResolverRef.current;
+    jdDuplicateResolverRef.current = null;
+    setJdDuplicatePrompt(null);
+    if (resolve) resolve(decision);
+  }, []);
 
   useEffect(() => {
     saveScreeningQueue(userId, { jobs, panelOpen });
@@ -250,9 +295,13 @@ export function ScreeningQueueProvider({ children }) {
       });
 
       try {
+        updateJob(job.id, {
+          progress: 'Checking JD / saving to Jobs…',
+        });
         const { preparedJd, selectedJob } = await prepareJdWhenProcessing(
           job,
           catalogRef.current || [],
+          askDuplicateDecision,
         );
 
         updateJob(job.id, {
@@ -351,17 +400,24 @@ export function ScreeningQueueProvider({ children }) {
           );
         }
       } catch (error) {
+        const cancelled = error instanceof JdStoreCancelledError
+          || error?.name === 'JdStoreCancelledError';
         // Keep the job + files so the user can preview and retry.
         updateJob(job.id, {
           status: 'failed',
-          progress: 'Failed — retry available',
+          progress: cancelled ? 'Cancelled — retry available' : 'Failed — retry available',
           error: error?.message || 'Screening failed.',
           hasLocalFiles: hasJobFiles(job.id),
         });
-        addToast(`${job.label}: ${error?.message || 'Screening failed.'}`, 'error');
+        addToast(
+          cancelled
+            ? `${job.label}: JD save cancelled. Choose Replace, Rename, or retry later.`
+            : `${job.label}: ${error?.message || 'Screening failed.'}`,
+          cancelled ? 'info' : 'error',
+        );
       }
     },
-    [addToast, refreshData, setScreeningResults, updateJob],
+    [addToast, askDuplicateDecision, refreshData, setScreeningResults, updateJob],
   );
 
   useEffect(() => {
@@ -425,6 +481,15 @@ export function ScreeningQueueProvider({ children }) {
   return (
     <ScreeningQueueContext.Provider value={value}>
       {children}
+      <DuplicateJobDialog
+        open={Boolean(jdDuplicatePrompt)}
+        existing={jdDuplicatePrompt?.existing}
+        reason={jdDuplicatePrompt?.reason}
+        suggestedTitle={jdDuplicatePrompt?.suggestedTitle}
+        onCancel={() => resolveDuplicateDecision({ action: 'cancel' })}
+        onReplace={() => resolveDuplicateDecision({ action: 'replace' })}
+        onRename={(title) => resolveDuplicateDecision({ action: 'rename', title })}
+      />
     </ScreeningQueueContext.Provider>
   );
 }

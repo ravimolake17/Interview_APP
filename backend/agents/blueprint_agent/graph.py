@@ -82,6 +82,8 @@ def validate_node(state: BlueprintGraphState) -> dict[str, Any]:
 
 
 def fallback_node(state: BlueprintGraphState) -> dict[str, Any]:
+    from agents.blueprint_agent.scenario_plan import enrich_blueprint_with_scenario_plan
+
     payload = InterviewBlueprintRequest.model_validate(state["RequestPayload"])
     blueprint = build_fallback_blueprint(
         payload,
@@ -89,6 +91,7 @@ def fallback_node(state: BlueprintGraphState) -> dict[str, Any]:
         candidate_level=payload.candidate_level,
         total_duration_minutes=payload.total_duration_minutes,
     )
+    blueprint = enrich_blueprint_with_scenario_plan(blueprint, payload)
     logger.warning(
         "Agent 3 using fallback blueprint for %s after failure: %s",
         state.get("CandidateID"),

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
 
 from agents.evaluation_agent.evaluator import build_candidate_context
 from agents.interview_agent.adaptive import generate_questions_with_llama
@@ -176,13 +179,39 @@ class InterviewAgentService:
                 "No Agent 3 blueprint found. Generate the interview plan before Agent 4 questions."
             )
 
-        blueprint = blueprint_row.blueprint_json or {}
+        blueprint = dict(blueprint_row.blueprint_json or {})
+        # Older blueprints may lack question_plan — enrich so Agent 4 can use scenario intents.
+        if not blueprint.get("question_plan"):
+            try:
+                from agents.blueprint_agent.scenario_plan import (
+                    enrich_blueprint_with_scenario_plan,
+                )
+                from agents.blueprint_agent.schemas import InterviewBlueprintResponse
+
+                enriched = enrich_blueprint_with_scenario_plan(
+                    InterviewBlueprintResponse.model_validate(blueprint),
+                    None,
+                )
+                blueprint = enriched.model_dump(mode="json")
+                blueprint_row.blueprint_json = blueprint
+                from sqlalchemy.orm.attributes import flag_modified
+
+                flag_modified(blueprint_row, "blueprint_json")
+                await self.db.flush()
+            except Exception:
+                logger.debug(
+                    "Could not enrich blueprint %s with question_plan",
+                    blueprint_row.id,
+                    exc_info=True,
+                )
         snap = candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
         resume_context = build_candidate_context(
             jd_text=candidate.jd_text,
             evaluation_snapshot=snap,
             job_position=candidate.job_position or blueprint_row.job_title,
         )
+        # LLM-primary from question_plan; HR can still add/edit/delete the saved bank.
+        # The live interview always uses the latest questions_json (final paper).
         questions = generate_questions_with_llama(
             blueprint,
             job_title=blueprint_row.job_title or candidate.job_position,

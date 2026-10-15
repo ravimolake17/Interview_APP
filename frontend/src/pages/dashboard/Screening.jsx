@@ -259,7 +259,7 @@ export default function Screening() {
                 <span>
                   <span className="font-medium">Store JD into Jobs</span>
                   <span className="block text-xs text-muted mt-0.5">
-                    Selected by default. When this queue job runs, the JD is parsed and saved first (auto-renamed on duplicates), then resumes are screened.
+                    Selected by default. When this queue job runs, the JD is parsed and saved first. If the same JD/title already exists, you choose Replace, Rename, or Cancel.
                   </span>
                 </span>
               </label>

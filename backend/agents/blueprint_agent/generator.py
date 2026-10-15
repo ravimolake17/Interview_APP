@@ -1761,7 +1761,10 @@ class InterviewBlueprintGenerator:
 def generate_interview_blueprint(
     payload: InterviewBlueprintRequest,
 ) -> InterviewBlueprintResponse:
-    return InterviewBlueprintGenerator().generate(payload)
+    from agents.blueprint_agent.scenario_plan import enrich_blueprint_with_scenario_plan
+
+    blueprint = InterviewBlueprintGenerator().generate(payload)
+    return enrich_blueprint_with_scenario_plan(blueprint, payload)
 
 
 # Backward compatibility for old route/import names.

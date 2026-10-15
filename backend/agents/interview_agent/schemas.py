@@ -74,7 +74,8 @@ class GenerateQuestionsRequest(BaseModel):
 
 
 class ManualQuestionRequest(BaseModel):
-    question_text: str = Field(min_length=8, max_length=600)
+    # HR final paper may include longer scenario questions (still one spoken turn).
+    question_text: str = Field(min_length=8, max_length=800)
     insert_at: int | None = Field(default=None, ge=1, le=200)
     category_id: str | None = Field(default=None, max_length=80)
     category_name: str | None = Field(default=None, max_length=120)

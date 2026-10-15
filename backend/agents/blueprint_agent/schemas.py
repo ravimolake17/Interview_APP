@@ -28,6 +28,52 @@ SkillSource = Literal[
     "jd_only",
 ]
 
+RoleFamily = Literal[
+    "software",
+    "data",
+    "ops",
+    "product",
+    "non_tech",
+    "general",
+]
+
+ProbeType = Literal[
+    "motivation",
+    "ownership",
+    "scale",
+    "failure",
+    "tradeoff",
+    "change",
+    "fundamentals",
+]
+
+
+class QuestionPlanSlot(BaseModel):
+    """Agent 3 plan slot for Agent 4 — intent only, never final spoken TTS text."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order: int = Field(ge=1)
+    category_id: BlueprintCategory
+    category_name: str = Field(min_length=1)
+    difficulty: Difficulty
+    skill: str = ""
+    evidence: str = ""
+    scenario_intent: str = Field(min_length=1)
+    probe_type: ProbeType = "ownership"
+    estimated_seconds: int = Field(default=120, ge=30, le=600)
+
+    @field_validator(
+        "category_name",
+        "skill",
+        "evidence",
+        "scenario_intent",
+        mode="before",
+    )
+    @classmethod
+    def clean_text_fields(cls, value: Any) -> str:
+        return _clean_text(value)
+
 
 CATEGORY_DISPLAY_ORDER: list[str] = [
     "Introductory Questions",
@@ -312,6 +358,8 @@ class Agent4Metadata(BaseModel):
         default_factory=lambda: [
             "category_breakdown",
             "skill_focus_plan",
+            "question_plan",
+            "role_family",
             "difficulty_distribution",
             "interview_flow",
             "time_allocation",
@@ -374,11 +422,12 @@ class InterviewBlueprintResponse(BaseModel):
 
     This is Interview Blueprint Report only.
     It does not contain final interview questions.
+    question_plan holds scenario intents for Agent 4 (not spoken TTS lines).
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    blueprint_version: str = "3.1"
+    blueprint_version: str = "3.2"
     generation_source: str = "deterministic_agent3_blueprint_logic"
 
     category_order: list[str] = Field(
@@ -386,6 +435,7 @@ class InterviewBlueprintResponse(BaseModel):
     )
 
     candidate_level: CandidateLevel
+    role_family: RoleFamily = "general"
     input_summary: InputSummary
 
     total_questions: int = Field(ge=4, le=60)
@@ -395,6 +445,7 @@ class InterviewBlueprintResponse(BaseModel):
     time_allocation: TimeAllocation
 
     skill_focus_plan: list[SkillFocusPlan] = Field(default_factory=list)
+    question_plan: list[QuestionPlanSlot] = Field(default_factory=list)
     interview_flow: list[FlowStep] = Field(default_factory=list)
     decision_factors: list[DecisionFactor] = Field(default_factory=list)
 
@@ -442,6 +493,9 @@ class InterviewBlueprintResponse(BaseModel):
                 "time_allocation.category_minutes must sum to "
                 "total_duration_minutes - buffer_minutes."
             )
+
+        if self.question_plan and len(self.question_plan) != self.total_questions:
+            raise ValueError("question_plan length must equal total_questions.")
 
         return self
 
