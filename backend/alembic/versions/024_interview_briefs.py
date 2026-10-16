@@ -5,7 +5,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "024_company_dept_interview_briefs"
+# Keep <= 32 chars — alembic_version.version_num is varchar(32).
+revision: str = "024_interview_briefs"
 down_revision: Union[str, None] = "023_no_default_department_seed"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
