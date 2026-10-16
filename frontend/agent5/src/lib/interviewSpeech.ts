@@ -160,8 +160,8 @@ export function startSilenceMonitor(
   onSilence: () => void,
   options?: { silenceMs?: number; threshold?: number; minSpeechMs?: number },
 ): SilenceMonitor {
-  // Pause after speech before auto-submit (thinking gaps should not cut mid-answer).
-  const silenceMs = options?.silenceMs ?? 5200
+  // Original production gap (~2.4s) after the candidate stops speaking.
+  const silenceMs = options?.silenceMs ?? 2400
   const threshold = options?.threshold ?? 0.018
   const minSpeechMs = options?.minSpeechMs ?? 1800
   const ctx = new AudioContext()

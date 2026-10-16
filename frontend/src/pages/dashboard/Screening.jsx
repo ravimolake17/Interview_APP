@@ -86,14 +86,14 @@ export default function Screening() {
       label,
       resumeFiles: [...resumeFiles],
       jdFile: jdMode === 'upload' ? jdFile : null,
-      jdText: jdMode === 'paste' ? jdText.trim() : '',
-      selectedJob: jdMode === 'saved' ? selectedJob : null,
-      sendInviteEmail,
+        jdText: jdMode === 'paste' ? jdText.trim() : '',
+        selectedJob: jdMode === 'saved' ? selectedJob : null,
+        sendInviteEmail,
       storeJd: jdMode !== 'saved' && storeJd,
       jdMode,
     });
 
-    addToast(
+        addToast(
       `Added to screening queue (${resumeFiles.length} resume${resumeFiles.length === 1 ? '' : 's'}). Watch the Queue tab.`,
       'success',
     );
