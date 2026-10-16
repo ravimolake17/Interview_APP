@@ -160,9 +160,9 @@ export function startSilenceMonitor(
   onSilence: () => void,
   options?: { silenceMs?: number; threshold?: number; minSpeechMs?: number },
 ): SilenceMonitor {
-  // Longer pause so thinking gaps / soft trailing words are not cut early.
-  const silenceMs = options?.silenceMs ?? 6500
-  const threshold = options?.threshold ?? 0.014
+  // Pause after speech before auto-submit (thinking gaps should not cut mid-answer).
+  const silenceMs = options?.silenceMs ?? 5200
+  const threshold = options?.threshold ?? 0.018
   const minSpeechMs = options?.minSpeechMs ?? 1800
   const ctx = new AudioContext()
   const analyser = ctx.createAnalyser()
