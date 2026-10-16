@@ -355,6 +355,12 @@ export function CandidatePage() {
   const speakAiQuestionRef = useRef<((current: CandidateSessionCredentials, session: AiInterviewSessionResponse) => Promise<void>) | null>(null)
   const lastBroadcastQuestionIdRef = useRef<string | null>(null)
   const answerChunksRef = useRef<Blob[]>([])
+  const liveAnswerTranscriptRef = useRef('')
+  const partialSttInFlightRef = useRef(false)
+  const lastPartialBlobSizeRef = useRef(0)
+  const partialSttTimerRef = useRef<number | null>(null)
+  const answerQuestionIdRef = useRef<string | null>(null)
+  const aiSessionRef = useRef<AiInterviewSessionResponse | null>(null)
   const phaseRef = useRef<CandidatePhase>('registration')
   const leavingInterviewRef = useRef(false)
   const capturingAnswerRef = useRef(false)
@@ -463,10 +469,22 @@ export function CandidatePage() {
     capturingAnswerRef.current = capturingAnswer
   }, [capturingAnswer])
 
+  useEffect(() => {
+    aiSessionRef.current = aiSession
+  }, [aiSession])
+
+  const stopPartialStt = useCallback(() => {
+    if (partialSttTimerRef.current) {
+      window.clearInterval(partialSttTimerRef.current)
+      partialSttTimerRef.current = null
+    }
+  }, [])
+
   const stopSilenceMonitor = useCallback(() => {
     silenceMonitorRef.current?.stop()
     silenceMonitorRef.current = null
-  }, [])
+    stopPartialStt()
+  }, [stopPartialStt])
 
   const closeInterviewTab = useCallback(() => {
     sessionStorage.removeItem('agent5-session')
@@ -2119,6 +2137,10 @@ export function CandidatePage() {
       window.speechSynthesis?.cancel()
       setAiSpeaking(false)
       answerChunksRef.current = []
+      liveAnswerTranscriptRef.current = ''
+      lastPartialBlobSizeRef.current = 0
+      partialSttInFlightRef.current = false
+      answerQuestionIdRef.current = aiSessionRef.current?.current_question?.id || aiSession?.current_question?.id || null
       stopMediaStream(answerRecordStreamRef.current)
       const answerStream = cloneMediaStream(stream, 'audio')
       answerRecordStreamRef.current = answerStream
@@ -2134,6 +2156,45 @@ export function CandidatePage() {
         if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
         void submitAnswerCaptureRef.current?.()
       })
+
+      // Live partial STT while speaking (same approach as HR interview lab).
+      stopPartialStt()
+      partialSttTimerRef.current = window.setInterval(() => {
+        void (async () => {
+          const current = credentialsRef.current
+          if (!current || !capturingAnswerRef.current) return
+          if (partialSttInFlightRef.current || submittingAnswerRef.current) return
+          if (answerRecorderRef.current?.state !== 'recording') return
+          if (!answerChunksRef.current.length) return
+          const blob = new Blob(answerChunksRef.current, { type: supportedMime(true) || 'audio/webm' })
+          if (blob.size < 8000 || blob.size - lastPartialBlobSizeRef.current < 4000) return
+          partialSttInFlightRef.current = true
+          try {
+            const form = new FormData()
+            form.append('file', blob, 'partial.webm')
+            form.append('partial', 'true')
+            if (answerQuestionIdRef.current) form.append('question_id', answerQuestionIdRef.current)
+            if (liveAnswerTranscriptRef.current) {
+              form.append('prior_text', liveAnswerTranscriptRef.current)
+            }
+            const transcribed = await requestJson<{ text: string }>(
+              `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
+              { method: 'POST', body: form },
+              current.token,
+              60_000,
+            )
+            const text = (transcribed.text || '').trim()
+            if (text && text.length >= liveAnswerTranscriptRef.current.length) {
+              liveAnswerTranscriptRef.current = text
+            }
+            lastPartialBlobSizeRef.current = blob.size
+          } catch {
+            /* partial failures are silent; final pass retries */
+          } finally {
+            partialSttInFlightRef.current = false
+          }
+        })()
+      }, 3000)
     } catch (error) {
       stopMediaStream(answerRecordStreamRef.current)
       answerRecordStreamRef.current = null
@@ -2170,18 +2231,26 @@ export function CandidatePage() {
     setConversationState('processing')
     setBusy('Processing your answer')
     try {
+      // Wait briefly if a partial STT call is still in flight.
+      for (let i = 0; i < 20 && partialSttInFlightRef.current; i += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100))
+      }
       const blob = new Blob(answerChunksRef.current, { type: supportedMime(true) || 'audio/webm' })
       if (!blob.size) throw new Error('No answer audio was captured.')
+      const priorText = liveAnswerTranscriptRef.current.trim()
       const form = new FormData()
       form.append('file', blob, 'answer.webm')
       if (session.current_question?.id) form.append('question_id', session.current_question.id)
+      if (priorText) form.append('prior_text', priorText)
       const transcribed = await requestJson<{ text: string }>(
         `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
         { method: 'POST', body: form },
         current.token,
         120_000,
       )
-      const text = (transcribed.text || '').trim()
+      const finalText = (transcribed.text || '').trim()
+      const text = finalText.length >= priorText.length ? finalText : priorText
+      liveAnswerTranscriptRef.current = ''
       if (!text) {
         throw new Error('We could not hear your answer clearly. Please speak again after the question.')
       }

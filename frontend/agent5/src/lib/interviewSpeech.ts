@@ -160,10 +160,11 @@ export function startSilenceMonitor(
   onSilence: () => void,
   options?: { silenceMs?: number; threshold?: number; minSpeechMs?: number },
 ): SilenceMonitor {
-  // Original production gap (~2.4s) after the candidate stops speaking.
+  // Production gap after speech ends (~2.4s). Uses adaptive noise/peak so fans
+  // and room hum do not keep "listening" forever.
   const silenceMs = options?.silenceMs ?? 2400
-  const threshold = options?.threshold ?? 0.018
-  const minSpeechMs = options?.minSpeechMs ?? 1800
+  const minThreshold = options?.threshold ?? 0.014
+  const minSpeechMs = options?.minSpeechMs ?? 1200
   const ctx = new AudioContext()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 2048
@@ -175,6 +176,9 @@ export function startSilenceMonitor(
   let speechAccumulatedMs = 0
   let lastSpeechAt = 0
   let silenceStart = 0
+  let noiseFloor = minThreshold
+  let speechPeak = minThreshold
+  let calibratedUntil = Date.now() + 700
   let frameId = 0
   let stopped = false
 
@@ -189,16 +193,29 @@ export function startSilenceMonitor(
     }
     const rms = Math.sqrt(sum / data.length)
     const now = Date.now()
-    if (rms > threshold) {
+
+    // Learn ambient level (fans / AC) so absolute thresholds do not stick open.
+    if (now < calibratedUntil || rms < noiseFloor * 1.35) {
+      noiseFloor = Math.min(0.04, Math.max(0.004, noiseFloor * 0.92 + rms * 0.08))
+    }
+
+    const speechGate = Math.max(minThreshold, noiseFloor * 2.4)
+    const quietGate = Math.max(noiseFloor * 1.55, speechPeak * 0.32, 0.008)
+    const isSpeech = rms >= speechGate
+
+    if (isSpeech) {
       if (!speechDetected) speechStartedAt = now
       speechDetected = true
+      speechPeak = Math.max(speechPeak * 0.97, rms)
       if (lastSpeechAt) speechAccumulatedMs += Math.min(80, now - lastSpeechAt)
       lastSpeechAt = now
       silenceStart = 0
     } else if (speechDetected) {
+      speechPeak = Math.max(speechPeak * 0.995, noiseFloor)
       const spokenLongEnough =
         speechAccumulatedMs >= minSpeechMs || (speechStartedAt > 0 && now - speechStartedAt >= minSpeechMs)
-      if (!spokenLongEnough) {
+      const isQuiet = rms <= quietGate
+      if (!spokenLongEnough || !isQuiet) {
         silenceStart = 0
       } else if (!silenceStart) {
         silenceStart = now
