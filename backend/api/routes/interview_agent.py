@@ -118,7 +118,13 @@ async def generate_questions(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         detail = str(exc)
-        status = 404 if "not found" in detail.lower() or "blueprint" in detail.lower() else 400
+        lowered = detail.lower()
+        if "not found" in lowered or "blueprint" in lowered:
+            status = 404
+        elif "interview slot" in lowered:
+            status = 409
+        else:
+            status = 400
         raise HTTPException(status_code=status, detail=detail) from exc
 
     await AuditService(db).log(

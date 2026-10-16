@@ -156,10 +156,13 @@ class InterviewAgentService:
         candidate_id: str,
         *,
         force: bool = False,
+        require_scheduled: bool = True,
     ) -> QuestionSetResponse:
         candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
             raise ValueError(f"Candidate not found: {candidate_id}")
+
+        from services.blueprint_service import candidate_ready_for_agent34
 
         existing = await self.questions_repo.get_latest(candidate_id)
         if not force:
@@ -172,6 +175,14 @@ class InterviewAgentService:
             # Creating the first question set after a late invite/booking must
             # still run even if the interview is already scheduled.
             await self.require_question_edits_allowed(candidate_id)
+
+        # New LLM generation waits until the candidate has booked a slot
+        # (unless SuperAdmin Agent Control opts into shortlist auto-generate).
+        if require_scheduled and not candidate_ready_for_agent34(candidate):
+            raise ValueError(
+                "Interview questions are generated only after the candidate "
+                "selects an interview slot."
+            )
 
         blueprint_row = await self.blueprint_repo.get_latest_for_candidate(candidate_id)
         if not blueprint_row:

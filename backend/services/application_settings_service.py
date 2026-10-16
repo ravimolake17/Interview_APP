@@ -373,8 +373,10 @@ class ApplicationSettingsService:
             "review_threshold": screening_settings.ATS_REVIEW_THRESHOLD,
             "use_llm_for_jd_parsing": screening_settings.USE_LLM_FOR_JD_PARSING,
             "use_llm_for_resume_parsing": screening_settings.USE_LLM_FOR_RESUME_PARSING,
+            "blueprint_auto_generate_on_shortlist": False,
         }
-        return ScreeningPolicySettings.model_validate(row.data if row else fallback)
+        raw = dict(row.data) if row and isinstance(row.data, dict) else {}
+        return ScreeningPolicySettings.model_validate({**fallback, **raw})
 
     async def save_screening_policy(
         self, payload: ScreeningPolicySettings, actor_id: int, *, company_id: int | None = None

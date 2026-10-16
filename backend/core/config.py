@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # Agent 3 — Interview Blueprint
     blueprint_max_jd_text_chars: int = 100_000
-    blueprint_auto_generate_on_shortlist: bool = True
+    # blueprint_auto_generate_on_shortlist lives in SuperAdmin → Agent Control (DB).
 
     # LangGraph checkpoint (enterprise durable state for Agents 2/4/1)
     checkpoint_db_url: str = "postgresql://postgres:postgres@localhost:5432/interview_scheduler"

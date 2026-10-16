@@ -16,7 +16,6 @@ from core.chroma_store import (
     retrieve_similar_resumes,
     summarize_similar_hits,
 )
-from core.config import get_settings
 from models.candidate import Candidate, CandidateStatus
 from models.interview import InterviewStatus
 from repositories.candidate_repository import CandidateRepository
@@ -667,8 +666,16 @@ async def save_and_schedule_shortlisted(
     blueprint_id = None
     candidate_level = None
     total_questions = None
-    if get_settings().blueprint_auto_generate_on_shortlist:
-        saved = await BlueprintService(db).ensure_plan_and_questions(candidate.candidate_id)
+    from services.application_settings_service import ApplicationSettingsService
+
+    policy = await ApplicationSettingsService(db).get_screening_policy(
+        getattr(candidate, "company_id", None)
+    )
+    if policy.blueprint_auto_generate_on_shortlist:
+        saved = await BlueprintService(db).ensure_plan_and_questions(
+            candidate.candidate_id,
+            require_scheduled=False,
+        )
         if saved:
             row, blueprint = saved
             blueprint_id = row.id
@@ -719,8 +726,16 @@ async def promote_to_shortlisted_and_schedule(
     blueprint_id = None
     candidate_level = None
     total_questions = None
-    if get_settings().blueprint_auto_generate_on_shortlist:
-        saved = await BlueprintService(db).ensure_plan_and_questions(candidate_id)
+    from services.application_settings_service import ApplicationSettingsService
+
+    policy = await ApplicationSettingsService(db).get_screening_policy(
+        getattr(candidate, "company_id", None)
+    )
+    if policy.blueprint_auto_generate_on_shortlist:
+        saved = await BlueprintService(db).ensure_plan_and_questions(
+            candidate_id,
+            require_scheduled=False,
+        )
         if saved:
             row, blueprint = saved
             blueprint_id = row.id
@@ -763,8 +778,7 @@ async def resend_shortlisted_invite(db: AsyncSession, candidate_id: str) -> Sche
     if result.get("Status") == "FAILED":
         raise RuntimeError(result.get("Error", "Interview scheduler workflow failed."))
 
-    # Late email / first successful invite must still produce Agent 3 + 4.
-    await BlueprintService(db).ensure_plan_and_questions(candidate_id)
+    # Agent 3/4 wait until the candidate books a slot (see book_slot).
 
     return SchedulingInfo(
         candidate_id=candidate_id,

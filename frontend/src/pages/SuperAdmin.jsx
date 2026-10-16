@@ -50,7 +50,7 @@ const TABS = [
   { id: 'departments', label: 'Departments', icon: Building2 },
   { id: 'llm', label: 'LLM & AI', icon: Cpu },
   { id: 'integration', label: 'API & Integration', icon: LinkIcon },
-  { id: 'screening', label: 'Screening', icon: SlidersHorizontal },
+  { id: 'screening', label: 'Agent Control', icon: SlidersHorizontal },
   { id: 'company', label: 'Company', icon: Globe },
   { id: 'data', label: 'Data Management', icon: Layers },
   { id: 'database', label: 'Database Console', icon: Table2 },
@@ -135,6 +135,7 @@ export default function SuperAdmin() {
     review_threshold: 55,
     use_llm_for_jd_parsing: true,
     use_llm_for_resume_parsing: true,
+    blueprint_auto_generate_on_shortlist: false,
   });
   const [auditEntries, setAuditEntries] = useState([]);
   const [companyFilter, setCompanyFilter] = useState('all');
@@ -443,12 +444,15 @@ export default function SuperAdmin() {
         review_threshold: Number(screeningForm.review_threshold),
         use_llm_for_jd_parsing: Boolean(screeningForm.use_llm_for_jd_parsing),
         use_llm_for_resume_parsing: Boolean(screeningForm.use_llm_for_resume_parsing),
+        blueprint_auto_generate_on_shortlist: Boolean(
+          screeningForm.blueprint_auto_generate_on_shortlist,
+        ),
       });
-      setMessage('Screening policy saved.');
+      setMessage('Agent control settings saved.');
       await loadAll();
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'Could not save screening policy.');
+      setError(typeof detail === 'string' ? detail : 'Could not save agent control settings.');
     } finally {
       setSaving(false);
     }
@@ -467,7 +471,7 @@ export default function SuperAdmin() {
       <div>
         <h2 className="text-xl font-bold text-col">SuperAdmin Control Plane</h2>
         <p className="text-sm text-muted mt-1">
-          Enterprise access for admins, departments, LLM, screening, company, data management, and the database console. Signed in as {currentUser?.email}.
+          Enterprise access for admins, departments, LLM, agent control, company, data management, and the database console. Signed in as {currentUser?.email}.
         </p>
       </div>
 
@@ -951,7 +955,9 @@ export default function SuperAdmin() {
 
       {tab === 'screening' && (
         <form onSubmit={saveScreening} className="card p-6 max-w-2xl space-y-4">
-          <p className="text-sm text-muted">ATS shortlist and review cutoffs used after resume scoring.</p>
+          <p className="text-sm text-muted">
+            ATS cutoffs and agent pipeline controls. Stored in the database (not .env).
+          </p>
           <div>
             <label className={labelCls}>Shortlist threshold</label>
             <input type="number" min="0" max="100" step="1" className={inputCls} value={screeningForm.shortlist_threshold} onChange={(e) => setScreeningForm((f) => ({ ...f, shortlist_threshold: e.target.value }))} />
@@ -978,8 +984,25 @@ export default function SuperAdmin() {
             />
             Use LLM for resume parsing
           </label>
+          <label className="flex items-start gap-2 text-sm text-col">
+            <input
+              type="checkbox"
+              checked={Boolean(screeningForm.blueprint_auto_generate_on_shortlist)}
+              onChange={(e) => setScreeningForm((f) => ({
+                ...f,
+                blueprint_auto_generate_on_shortlist: e.target.checked,
+              }))}
+              className="rounded border-col mt-0.5"
+            />
+            <span>
+              Auto-generate blueprint &amp; questions on shortlist
+              <span className="block text-xs text-muted mt-0.5">
+                Off by default. Leave unchecked so Agent 3/4 run only after the candidate books a slot (saves LLM cost).
+              </span>
+            </span>
+          </label>
           <button type="submit" disabled={saving} className="btn-primary inline-flex items-center gap-2">
-            <Save size={14} /> Save screening policy
+            <Save size={14} /> Save agent control
           </button>
         </form>
       )}

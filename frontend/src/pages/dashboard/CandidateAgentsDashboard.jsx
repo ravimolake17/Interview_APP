@@ -383,7 +383,12 @@ export default function CandidateAgentsDashboard() {
     }
     try {
       const { data } = await getHRCandidateDetail(candidateId);
-      setCandidate(mapCandidateFromBackend(data, data));
+      const mapped = mapCandidateFromBackend(data, data);
+      setCandidate(mapped);
+      // Agent 3/4 only after the candidate books a slot — do not auto-spend LLM earlier.
+      const interviewBooked = Boolean(
+        mapped.scheduledDate || mapped.meetingLink || mapped.interviewScheduled,
+      );
 
       setBlueprintLoading(true);
       try {
@@ -411,7 +416,7 @@ export default function CandidateAgentsDashboard() {
           setEditDuration(
             Number.isFinite(availabilityMinutes) ? availabilityMinutes : DEFAULT_DURATION_MINUTES,
           );
-          if (!autoPlanRef.current) {
+          if (interviewBooked && !autoPlanRef.current) {
             autoPlanRef.current = true;
             try {
               const generated = await generateCandidateBlueprint(candidateId, { force: false });
@@ -440,7 +445,11 @@ export default function CandidateAgentsDashboard() {
         const qs = statusRes.data?.question_set?.questions || [];
         if (qs.length) {
           setSelectedQuestionId(qs[0].id);
-        } else if (statusRes.data?.blueprint_ready && !autoQuestionsRef.current) {
+        } else if (
+          interviewBooked
+          && statusRes.data?.blueprint_ready
+          && !autoQuestionsRef.current
+        ) {
           autoQuestionsRef.current = true;
           setGeneratingQuestions(true);
           try {

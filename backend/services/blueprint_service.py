@@ -14,13 +14,23 @@ from agents.blueprint_agent.schemas import (
     InterviewBlueprintRequest,
     InterviewBlueprintResponse,
 )
-from models.candidate import Candidate
+from models.candidate import Candidate, CandidateStatus
 from models.interview_blueprint import InterviewBlueprint
 from repositories.blueprint_repository import BlueprintRepository
 from repositories.candidate_repository import CandidateRepository
 from services.application_settings_service import ApplicationSettingsService
 
 logger = logging.getLogger(__name__)
+
+# Agent 3 + Agent 4 only after the candidate books (or interview already ran).
+_AGENT34_READY_STATUSES = {
+    CandidateStatus.INTERVIEW_SCHEDULED,
+    CandidateStatus.INTERVIEW_COMPLETED,
+}
+
+
+def candidate_ready_for_agent34(candidate: Candidate | None) -> bool:
+    return bool(candidate and candidate.status in _AGENT34_READY_STATUSES)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -154,16 +164,26 @@ class BlueprintService:
         force: bool = False,
         candidate_level: str | None = None,
         total_duration_minutes: int | None = None,
+        require_scheduled: bool = True,
     ) -> tuple[InterviewBlueprint, InterviewBlueprintResponse]:
         candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
             raise ValueError(f"Candidate not found: {candidate_id}")
+        if require_scheduled and not candidate_ready_for_agent34(candidate):
+            raise ValueError(
+                "Interview plan and questions are generated only after the candidate "
+                "selects an interview slot."
+            )
 
         has_overrides = candidate_level is not None or total_duration_minutes is not None
         if not force and not has_overrides:
             existing = await self.repo.get_latest_for_candidate(candidate_id)
             if existing:
-                await self._ensure_interview_questions(candidate_id, force=False)
+                await self._ensure_interview_questions(
+                    candidate_id,
+                    force=False,
+                    require_scheduled=require_scheduled,
+                )
                 return existing, InterviewBlueprintResponse.model_validate(
                     existing.blueprint_json
                 )
@@ -191,22 +211,37 @@ class BlueprintService:
                 meta.get("error"),
             )
         row = await self._persist(candidate, blueprint)
-        await self._ensure_interview_questions(candidate.candidate_id, force=True)
+        await self._ensure_interview_questions(
+            candidate.candidate_id,
+            force=True,
+            require_scheduled=require_scheduled,
+        )
         return row, blueprint
 
     async def ensure_plan_and_questions(
         self,
         candidate_id: str,
+        *,
+        require_scheduled: bool = True,
     ) -> tuple[InterviewBlueprint, InterviewBlueprintResponse] | None:
         """Create Agent 3 + Agent 4 when missing.
 
-        Used after a late invite (HR added email later) and after slot booking
-        so the rest of the pipeline still runs even if Agent 2 used the
-        database fallback instead of a live LangGraph interrupt.
+        Default: only after slot booking. Pass require_scheduled=False when
+        SuperAdmin Agent Control enables auto-generate on shortlist.
         """
+        candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
+        if require_scheduled and not candidate_ready_for_agent34(candidate):
+            logger.info(
+                "Skipping Agent 3/4 for %s until interview is scheduled (status=%s)",
+                candidate_id,
+                getattr(candidate, "status", None),
+            )
+            return None
         try:
             return await self.generate_and_save_for_candidate(
-                candidate_id, force=False
+                candidate_id,
+                force=False,
+                require_scheduled=require_scheduled,
             )
         except Exception:
             logger.exception(
@@ -236,7 +271,11 @@ class BlueprintService:
                 payload, candidate_id=candidate.candidate_id
             )
             row = await self._persist(candidate, blueprint)
-            await self._ensure_interview_questions(candidate.candidate_id, force=True)
+            await self._ensure_interview_questions(
+                candidate.candidate_id,
+                force=True,
+                require_scheduled=False,
+            )
             logger.info(
                 "Agent 3 blueprint saved for %s — level=%s questions=%s fallback=%s",
                 candidate.candidate_id,
@@ -255,13 +294,21 @@ class BlueprintService:
     async def get_latest(self, candidate_id: str) -> InterviewBlueprint | None:
         return await self.repo.get_latest_for_candidate(candidate_id)
 
-    async def _ensure_interview_questions(self, candidate_id: str, *, force: bool = False) -> None:
+    async def _ensure_interview_questions(
+        self,
+        candidate_id: str,
+        *,
+        force: bool = False,
+        require_scheduled: bool = True,
+    ) -> None:
         """Create Agent 4 questions automatically once an Agent 3 plan exists."""
         try:
             from services.interview_agent_service import InterviewAgentService
 
             await InterviewAgentService(self.db).generate_questions(
-                candidate_id, force=force
+                candidate_id,
+                force=force,
+                require_scheduled=require_scheduled,
             )
         except Exception:
             logger.exception(

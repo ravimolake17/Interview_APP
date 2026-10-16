@@ -124,7 +124,15 @@ async def generate_blueprint_for_candidate(
             total_duration_minutes=total_duration_minutes,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        detail = str(exc)
+        lowered = detail.lower()
+        if "not found" in lowered:
+            status = 404
+        elif "interview slot" in lowered:
+            status = 409
+        else:
+            status = 404
+        raise HTTPException(status_code=status, detail=detail) from exc
     except Exception as exc:
         logger.exception("Blueprint generation failed for %s", candidate_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -177,17 +185,14 @@ async def get_blueprint_for_candidate(
 ):
     """Fetch the latest stored Agent 3 blueprint for a candidate.
 
-    If the invite was sent late or booking used the DB fallback, generate
-    Agent 3 (and Agent 4 questions) on first HR view so the pipeline continues.
+    Catch-up generation runs only after the candidate has booked a slot
+    (INTERVIEW_SCHEDULED), not on shortlist/invite alone.
     """
     service = BlueprintService(db)
     row = await service.get_latest(candidate_id)
     if not row:
         candidate = await CandidateRepository(db).get_by_candidate_id(candidate_id)
-        if candidate and candidate.status in {
-            CandidateStatus.SHORTLISTED,
-            CandidateStatus.INTERVIEW_SCHEDULED,
-        }:
+        if candidate and candidate.status == CandidateStatus.INTERVIEW_SCHEDULED:
             try:
                 generated = await service.generate_and_save_for_candidate(
                     candidate_id, force=False

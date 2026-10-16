@@ -205,6 +205,8 @@ class ScreeningPolicySettings(BaseModel):
     review_threshold: float = Field(default=55.0, ge=0, le=100)
     use_llm_for_jd_parsing: bool = True
     use_llm_for_resume_parsing: bool = True
+    # When False (default), Agent 3/4 wait until the candidate books a slot.
+    blueprint_auto_generate_on_shortlist: bool = False
 
     @model_validator(mode="after")
     def shortlist_above_review(self) -> "ScreeningPolicySettings":
