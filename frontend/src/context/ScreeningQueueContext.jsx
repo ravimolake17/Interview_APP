@@ -121,12 +121,20 @@ async function prepareJdWhenProcessing(job, jobsCatalog, askDuplicateDecision) {
 
 export function ScreeningQueueProvider({ children }) {
   const { user } = useAuth();
-  const { addToast, refreshData, setScreeningResults, jobs: catalogJobs } = useApp();
+  const {
+    addToast,
+    refreshData,
+    setScreeningResults,
+    jobs: catalogJobs,
+    workingCompanyId,
+  } = useApp();
   const userId = user?.id || user?.email || null;
+  const companyId = workingCompanyId || user?.company_id || null;
 
   const restoredRef = useRef(null);
-  if (restoredRef.current?.userId !== userId) {
-    restoredRef.current = { userId, ...loadScreeningQueue(userId) };
+  const scopeKey = `${userId || 'guest'}:${companyId || 0}`;
+  if (restoredRef.current?.scopeKey !== scopeKey) {
+    restoredRef.current = { scopeKey, ...loadScreeningQueue(userId, companyId) };
   }
 
   const [jobs, setJobs] = useState(() => restoredRef.current.jobs || []);
@@ -135,6 +143,7 @@ export function ScreeningQueueProvider({ children }) {
   const activeJobIdRef = useRef(null);
   const jobsRef = useRef(jobs);
   jobsRef.current = jobs;
+  const jobsCompanyRef = useRef(companyId);
   const catalogRef = useRef(catalogJobs);
   catalogRef.current = catalogJobs;
   const jdDuplicateResolverRef = useRef(null);
@@ -159,16 +168,19 @@ export function ScreeningQueueProvider({ children }) {
   }, []);
 
   useEffect(() => {
-    saveScreeningQueue(userId, { jobs, panelOpen });
-  }, [userId, jobs, panelOpen]);
-
-  useEffect(() => {
-    const saved = loadScreeningQueue(userId);
-    restoredRef.current = { userId, ...saved };
+    const saved = loadScreeningQueue(userId, companyId);
+    restoredRef.current = { scopeKey, ...saved };
     setJobs(saved.jobs || []);
     setPanelOpen(Boolean(saved.panelOpen) && (saved.jobs || []).length > 0);
     activeJobIdRef.current = null;
-  }, [userId]);
+    jobsCompanyRef.current = companyId;
+  }, [userId, companyId, scopeKey]);
+
+  useEffect(() => {
+    // Skip until jobs state matches the active company (avoids cross-writes on switch).
+    if (jobsCompanyRef.current !== companyId) return;
+    saveScreeningQueue(userId, companyId, { jobs, panelOpen });
+  }, [userId, companyId, jobs, panelOpen]);
 
   const updateJob = useCallback((id, patch) => {
     setJobs((prev) =>
@@ -184,6 +196,7 @@ export function ScreeningQueueProvider({ children }) {
 
     const job = {
       id,
+      companyId: companyId != null ? Number(companyId) : null,
       createdAt: Date.now(),
       label: payload.label || 'Screening job',
       resumeCount: resumeFiles.length,
@@ -204,7 +217,7 @@ export function ScreeningQueueProvider({ children }) {
     setJobs((prev) => [...prev, job]);
     setPanelOpen(true);
     return id;
-  }, []);
+  }, [companyId]);
 
   const dismissJob = useCallback((id) => {
     clearJobFiles(id);

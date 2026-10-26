@@ -12,21 +12,23 @@ const AUDIT_ACTIONS = new Set([
   'JOB_DELETED',
 ]);
 
-function storageKey(userId) {
-  return userId ? `${DISMISSED_KEY}-${userId}` : `${DISMISSED_KEY}-guest`;
+function storageKey(userId, companyId = null) {
+  const userPart = userId ? String(userId) : 'guest';
+  const companyPart = companyId ? `c${companyId}` : 'c0';
+  return `${DISMISSED_KEY}-${userPart}-${companyPart}`;
 }
 
-export function loadDismissedIds(userId) {
+export function loadDismissedIds(userId, companyId = null) {
   try {
-    const raw = localStorage.getItem(storageKey(userId));
+    const raw = localStorage.getItem(storageKey(userId, companyId));
     return new Set(JSON.parse(raw || '[]'));
   } catch {
     return new Set();
   }
 }
 
-export function saveDismissedIds(userId, ids) {
-  localStorage.setItem(storageKey(userId), JSON.stringify([...ids]));
+export function saveDismissedIds(userId, ids, companyId = null) {
+  localStorage.setItem(storageKey(userId, companyId), JSON.stringify([...ids]));
 }
 
 export function formatRelativeTime(dateInput) {

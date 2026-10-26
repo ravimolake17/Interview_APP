@@ -130,8 +130,8 @@ export function AppProvider({ children }) {
   }, [appearance]);
 
   useEffect(() => {
-    setDismissedNotificationIds(loadDismissedIds(user?.id ?? null));
-  }, [user?.id]);
+    setDismissedNotificationIds(loadDismissedIds(user?.id ?? null, workingCompanyId));
+  }, [user?.id, workingCompanyId]);
 
   useEffect(() => {
     const saved = loadAppearanceSettings(user?.id ?? null);
@@ -253,20 +253,20 @@ export function AppProvider({ children }) {
     setDismissedNotificationIds((current) => {
       const next = new Set(current);
       next.add(notificationId);
-      saveDismissedIds(user?.id ?? null, next);
+      saveDismissedIds(user?.id ?? null, next, workingCompanyId);
       return next;
     });
-  }, [user?.id]);
+  }, [user?.id, workingCompanyId]);
 
   const clearAllNotifications = useCallback((notificationIds = []) => {
     if (!notificationIds.length) return;
     setDismissedNotificationIds((current) => {
       const next = new Set(current);
       notificationIds.forEach((id) => next.add(id));
-      saveDismissedIds(user?.id ?? null, next);
+      saveDismissedIds(user?.id ?? null, next, workingCompanyId);
       return next;
     });
-  }, [user?.id]);
+  }, [user?.id, workingCompanyId]);
 
   const addToast = useCallback((message, type = 'success') => {
     const id = Date.now();
@@ -369,7 +369,8 @@ export function AppProvider({ children }) {
         getDepartments(),
       ];
       if (isSuperAdmin(user?.role)) {
-        requests.push(getAuditLogs(100));
+        // Scope audit (and thus notifications) to the active company.
+        requests.push(getAuditLogs(100, workingCompanyId || undefined));
       }
 
       const results = await Promise.all(requests);

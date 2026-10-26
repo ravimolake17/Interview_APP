@@ -1,8 +1,10 @@
 const STORAGE_KEY = 'rr-parkon-screening-queue';
 const MAX_JOBS = 30;
 
-function storageKey(userId) {
-  return userId ? `${STORAGE_KEY}-${userId}` : `${STORAGE_KEY}-guest`;
+function storageKey(userId, companyId) {
+  const userPart = userId ? String(userId) : 'guest';
+  const companyPart = companyId ? `c${companyId}` : 'c0';
+  return `${STORAGE_KEY}-${userPart}-${companyPart}`;
 }
 
 /** Persistable snapshot — never store File blobs. */
@@ -11,6 +13,7 @@ export function serializeQueueJobs(jobs) {
     .slice(-MAX_JOBS)
     .map((job) => ({
       id: job.id,
+      companyId: job.companyId ?? null,
       createdAt: job.createdAt,
       label: job.label,
       resumeCount: job.resumeCount,
@@ -29,35 +32,44 @@ export function serializeQueueJobs(jobs) {
     }));
 }
 
-export function normalizeRestoredJobs(jobs) {
-  return (Array.isArray(jobs) ? jobs : []).map((job) => {
-    const wasInFlight = job.status === 'queued' || job.status === 'processing';
-    const base = {
-      ...job,
-      preparedJd: null,
-      hasLocalFiles: false,
-    };
-    if (!wasInFlight) {
-      return base;
-    }
-    // Files cannot survive a refresh — keep the entry as failed for audit / preview.
-    return {
-      ...base,
-      status: 'failed',
-      progress: 'Interrupted — kept in queue',
-      error:
-        job.error
-        || 'This screening was interrupted (page refresh). Entry kept in queue for reference — re-add the files to run again.',
-    };
-  });
+export function normalizeRestoredJobs(jobs, companyId = null) {
+  const wanted = companyId != null ? Number(companyId) : null;
+  return (Array.isArray(jobs) ? jobs : [])
+    .filter((job) => {
+      if (wanted == null || !Number.isFinite(wanted)) return true;
+      const jobCompany = job.companyId != null ? Number(job.companyId) : null;
+      // Legacy rows without companyId stay only in the unscoped bucket (c0).
+      if (jobCompany == null) return wanted === 0;
+      return jobCompany === wanted;
+    })
+    .map((job) => {
+      const wasInFlight = job.status === 'queued' || job.status === 'processing';
+      const base = {
+        ...job,
+        preparedJd: null,
+        hasLocalFiles: false,
+      };
+      if (!wasInFlight) {
+        return base;
+      }
+      // Files cannot survive a refresh — keep the entry as failed for audit / preview.
+      return {
+        ...base,
+        status: 'failed',
+        progress: 'Interrupted — kept in queue',
+        error:
+          job.error
+          || 'This screening was interrupted (page refresh). Entry kept in queue for reference — re-add the files to run again.',
+      };
+    });
 }
 
-export function loadScreeningQueue(userId) {
+export function loadScreeningQueue(userId, companyId = null) {
   try {
-    const raw = localStorage.getItem(storageKey(userId));
+    const raw = localStorage.getItem(storageKey(userId, companyId));
     if (!raw) return { jobs: [], panelOpen: false };
     const parsed = JSON.parse(raw);
-    const jobs = normalizeRestoredJobs(parsed.jobs || parsed || []);
+    const jobs = normalizeRestoredJobs(parsed.jobs || parsed || [], companyId);
     return {
       jobs,
       panelOpen: Boolean(parsed.panelOpen) && jobs.length > 0,
@@ -67,10 +79,10 @@ export function loadScreeningQueue(userId) {
   }
 }
 
-export function saveScreeningQueue(userId, { jobs, panelOpen }) {
+export function saveScreeningQueue(userId, companyId, { jobs, panelOpen }) {
   try {
     localStorage.setItem(
-      storageKey(userId),
+      storageKey(userId, companyId),
       JSON.stringify({
         jobs: serializeQueueJobs(jobs),
         panelOpen: Boolean(panelOpen),
