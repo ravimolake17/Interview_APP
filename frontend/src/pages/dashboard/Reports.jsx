@@ -9,7 +9,7 @@ import { Link } from 'react-router-dom';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import { useApp } from '../../context/AppContext';
 import { exportReport } from '../../utils/reportExport';
-import { wholePercentShares } from '../../utils/helpers';
+import { percentShares } from '../../utils/helpers';
 import { listHrRecommendationReports } from '../../services/api';
 
 const CustomTooltip = ({ active, payload, label }) => {
@@ -108,7 +108,7 @@ export default function Reports() {
     hiringFunnel.find((stage) => stage.stage === 'Screened')?.count
     ?? funnelOutcomes.reduce((sum, stage) => sum + Number(stage.count || 0), 0),
   );
-  const funnelWithPercents = wholePercentShares(funnelOutcomes, { total: screenedTotal });
+  const funnelWithPercents = percentShares(funnelOutcomes, { total: screenedTotal, decimals: 2 });
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -275,7 +275,7 @@ export default function Reports() {
 
       <ChartCard
         title="Hiring Funnel"
-        subtitle={`Current status as a share of ${screenedTotal} screened candidates. These percentages add up to 100%.`}
+        subtitle={`Current status as a share of ${screenedTotal} screened candidates.`}
         delay={0.3}
       >
         <div className="space-y-3">
@@ -290,12 +290,14 @@ export default function Reports() {
               'Needs Review': '#F59E0B',
               Shortlisted: '#22C55E',
               'Interview Scheduled': '#0891B2',
+              'Interview Completed': '#2563EB',
               Rejected: '#EF4444',
             };
             const barColor = stageColors[stage.stage] || '#2563EB';
+            const pctLabel = Number(pct).toFixed(2);
             return (
               <div key={stage.stage} className="flex items-center gap-4">
-                <span className="text-sm text-muted w-32 text-right flex-shrink-0">{stage.stage}</span>
+                <span className="text-sm text-muted w-36 text-right flex-shrink-0">{stage.stage}</span>
                 <div className="flex-1 bg-slate-100 dark:bg-slate-800 rounded-full h-7 overflow-hidden">
                   {pct > 0 ? (
                     <motion.div
@@ -311,7 +313,7 @@ export default function Reports() {
                     <span className="h-full flex items-center pl-3 text-xs font-semibold text-muted">0</span>
                   )}
                 </div>
-                <span className="text-xs text-muted w-10 flex-shrink-0 tabular-nums">{pct}%</span>
+                <span className="text-xs text-muted w-14 flex-shrink-0 tabular-nums text-right">{pctLabel}%</span>
               </div>
             );
           })}

@@ -70,8 +70,8 @@ export function getAvatarGradient(name) {
   return GRADIENTS[idx];
 }
 
-// Share of a total as whole percents that always sum to 100.
-export function wholePercentShares(items, { getCount = (item) => item.count, total } = {}) {
+// Share of a total as percents (default 2 decimals, e.g. 33.33).
+export function percentShares(items, { getCount = (item) => item.count, total, decimals = 2 } = {}) {
   const counts = items.map((item) => Number(getCount(item)) || 0);
   const denom = Number(total);
   const base = Number.isFinite(denom) && denom > 0
@@ -80,24 +80,16 @@ export function wholePercentShares(items, { getCount = (item) => item.count, tot
   if (!base) {
     return items.map((item) => ({ ...item, percent: 0 }));
   }
+  const places = Number.isFinite(decimals) && decimals >= 0 ? decimals : 2;
+  return items.map((item, index) => ({
+    ...item,
+    percent: Number(((counts[index] / base) * 100).toFixed(places)),
+  }));
+}
 
-  const parts = counts.map((count, index) => {
-    const raw = (count / base) * 100;
-    const floor = Math.floor(raw);
-    return { index, count, floor, remainder: raw - floor };
-  });
-  let leftover = 100 - parts.reduce((sum, part) => sum + part.floor, 0);
-  [...parts]
-    .filter((part) => part.count > 0)
-    .sort((a, b) => b.remainder - a.remainder || b.count - a.count)
-    .forEach((part) => {
-      if (leftover <= 0) return;
-      part.floor += 1;
-      leftover -= 1;
-    });
-
-  const percentByIndex = new Map(parts.map((part) => [part.index, part.floor]));
-  return items.map((item, index) => ({ ...item, percent: percentByIndex.get(index) ?? 0 }));
+/** @deprecated Prefer percentShares — kept for callers that need whole integers. */
+export function wholePercentShares(items, options = {}) {
+  return percentShares(items, { ...options, decimals: 0 });
 }
 
 export function formatFileSize(bytes) {
