@@ -5,6 +5,7 @@ import LoadingSpinner from '../components/LoadingSpinner';
 import PasswordInput from '../components/PasswordInput';
 import CompanyTableFilter, { companyLabel, matchesCompanyFilter } from '../components/CompanyTableFilter';
 import { isValidEmail, isValidPassword } from '../utils/validation';
+import { formatApiError } from '../utils/apiError';
 import { useAuth } from '../context/AuthContext';
 import { useApp } from '../context/AppContext';
 import { isSuperAdmin } from '../utils/roles';
@@ -154,7 +155,7 @@ export default function AdminUsers() {
     } catch (err) {
       setMessage({
         type: 'error',
-        text: err.response?.data?.detail || 'Failed to create user.',
+        text: formatApiError(err, 'Failed to create user.'),
       });
     } finally {
       setSaving(false);
@@ -185,7 +186,7 @@ export default function AdminUsers() {
     } catch (err) {
       setMessage({
         type: 'error',
-        text: err.response?.data?.detail || 'Failed to update user.',
+        text: formatApiError(err, 'Failed to update user.'),
       });
     } finally {
       setSaving(false);

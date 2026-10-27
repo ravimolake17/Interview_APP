@@ -176,7 +176,8 @@ async def create_user(
         ),
     )
     await db.commit()
-    return UserResponse.model_validate(user)
+    fresh = await UserRepository(db).get_by_id(user.id)
+    return UserResponse.model_validate(fresh or user)
 
 
 @router.patch("/users/{user_id}", response_model=UserResponse)
@@ -269,4 +270,5 @@ async def update_user(
         ),
     )
     await db.commit()
-    return UserResponse.model_validate(user)
+    fresh = await UserRepository(db).get_by_id(user.id)
+    return UserResponse.model_validate(fresh or user)

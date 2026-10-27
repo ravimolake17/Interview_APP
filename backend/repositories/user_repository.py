@@ -47,7 +47,11 @@ class UserRepository:
         )
         self.db.add(user)
         await self.db.flush()
-        return user
+        # Reload with company so UserResponse serialization does not lazy-load
+        # (async sessions raise after create and the client wrongly shows failure).
+        loaded = await self.get_by_id(user.id)
+        assert loaded is not None
+        return loaded
 
     async def update_last_login(self, user: User) -> None:
         user.last_login_at = datetime.now(timezone.utc)

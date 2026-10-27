@@ -238,11 +238,34 @@ export default function Reports() {
         </ChartCard>
 
         <ChartCard title="Top Skills in Market" subtitle="From matched resume skills" delay={0.25}>
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart data={topSkills} layout="vertical" barSize={16}>
+          <ResponsiveContainer width="100%" height={Math.max(220, topSkills.length * 36)}>
+            <BarChart
+              data={topSkills}
+              layout="vertical"
+              barSize={16}
+              margin={{ top: 4, right: 16, left: 4, bottom: 4 }}
+            >
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" horizontal={false} />
-              <XAxis type="number" tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} />
-              <YAxis type="category" dataKey="skill" tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }} axisLine={false} tickLine={false} width={80} />
+              <XAxis
+                type="number"
+                allowDecimals={false}
+                tick={{ fill: 'var(--color-text-muted)', fontSize: 11 }}
+                axisLine={false}
+                tickLine={false}
+              />
+              <YAxis
+                type="category"
+                dataKey="skill"
+                width={140}
+                interval={0}
+                tick={{ fill: 'var(--color-text-muted)', fontSize: 10 }}
+                tickFormatter={(value) => {
+                  const label = String(value || '');
+                  return label.length > 22 ? `${label.slice(0, 20)}…` : label;
+                }}
+                axisLine={false}
+                tickLine={false}
+              />
               <Tooltip content={<CustomTooltip />} />
               <Bar dataKey="count" name="Candidates" fill="#7C3AED" radius={[0, 4, 4, 0]} />
             </BarChart>

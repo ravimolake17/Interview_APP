@@ -54,11 +54,14 @@ export function SkillBadge({ skill, missing = false }) {
 export function RecommendationBadge({ recommendation }) {
   const map = {
     'Highly Recommended': { cls: 'bg-green-500 text-white', dot: '★★★' },
-    'Recommended': { cls: 'bg-blue-500 text-white', dot: '★★' },
-    'Consider': { cls: 'bg-amber-500 text-white', dot: '★' },
+    Recommended: { cls: 'bg-blue-500 text-white', dot: '★★' },
+    Hire: { cls: 'bg-emerald-500 text-white', dot: '★★★' },
+    Consider: { cls: 'bg-amber-500 text-white', dot: '★' },
+    Hold: { cls: 'bg-slate-500 text-white', dot: '○' },
+    Reject: { cls: 'bg-red-500 text-white', dot: '✗' },
     'Not Recommended': { cls: 'bg-red-500 text-white', dot: '✗' },
   };
-  const r = map[recommendation] || map['Consider'];
+  const r = map[recommendation] || map.Consider;
   return (
     <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold ${r.cls}`}>
       <span className="text-xs">{r.dot}</span>

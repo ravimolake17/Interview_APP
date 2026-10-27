@@ -9,6 +9,7 @@ from core.tenancy import normalize_role
 from models.company import CompanyStatus
 from models.user import User, UserRole
 from repositories.company_repository import CompanyRepository
+from repositories.user_repository import UserRepository
 from schemas.auth import UserResponse
 from schemas.company import (
     CompanyCreateRequest,
@@ -171,4 +172,5 @@ async def create_company_user(
         company_id=company.id,
     )
     await db.commit()
-    return UserResponse.model_validate(user)
+    fresh = await UserRepository(db).get_by_id(user.id)
+    return UserResponse.model_validate(fresh or user)

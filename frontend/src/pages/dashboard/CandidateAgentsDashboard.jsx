@@ -1215,6 +1215,26 @@ export default function CandidateAgentsDashboard() {
   }
 
   const hasScreening = Boolean(candidate.evaluationSnapshot) || candidate.matchScore > 0;
+  const interviewCompleted =
+    candidate.status === 'Interview Completed'
+    || candidate.backendStatus === 'INTERVIEW_COMPLETED'
+    || Boolean(candidate.interviewCompleted);
+  const hrReport = agent7?.latest?.report || null;
+  const headerScore = interviewCompleted && hrReport
+    ? Math.round(Number(hrReport.overall_score || 0))
+    : (candidate.matchScore || 0);
+  const headerRecommendation = (() => {
+    if (interviewCompleted && hrReport) {
+      const decision = String(hrReport.decision || '').trim().toUpperCase();
+      if (decision === 'HIRE') return 'Hire';
+      if (decision === 'CONSIDER') return 'Consider';
+      if (decision === 'REJECT') return 'Reject';
+      if (decision === 'HOLD') return 'Hold';
+      return hrReport.decision || 'Hold';
+    }
+    if (interviewCompleted && !hrReport) return null;
+    return candidate.recommendation || null;
+  })();
   const hasSchedule = Boolean(candidate.scheduledDate || candidate.meetingLink || candidate.interviewScheduled);
   const agent5Status = agent5CardStatus(agent5, candidate.joinLink, agent5Loading);
   const agent5Closed = ['terminated', 'completed'].includes(
@@ -1311,10 +1331,24 @@ export default function CandidateAgentsDashboard() {
             </div>
           </div>
           <div className="flex items-center gap-3 shrink-0">
-            <MatchScore score={candidate.matchScore || 0} size="lg" />
-            {candidate.recommendation ? (
-              <RecommendationBadge recommendation={candidate.recommendation} />
-            ) : null}
+            {interviewCompleted && !hrReport ? (
+              <div className="text-right">
+                <p className="text-sm font-semibold text-col">Interview done</p>
+                <p className="text-[11px] text-muted">Generate Agent 7 HR report for overall score</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-col items-center gap-0.5">
+                  <MatchScore score={headerScore} size="lg" />
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-muted">
+                    {interviewCompleted ? 'Overall' : 'Screening'}
+                  </span>
+                </div>
+                {headerRecommendation ? (
+                  <RecommendationBadge recommendation={headerRecommendation} />
+                ) : null}
+              </>
+            )}
           </div>
         </div>
       </div>
