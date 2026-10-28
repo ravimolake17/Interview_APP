@@ -214,6 +214,39 @@ def build_candidate_context(
     }
 
 
+def _normalize_candidate_level(raw: str | None) -> str:
+    level = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if level in {"fresher", "entry", "entry_level", "junior", "intern", "internship"}:
+        return "fresher"
+    if level in {"senior", "lead", "principal", "staff", "architect"}:
+        return "senior"
+    if level in {"mid", "mid_level", "intermediate", "experienced"}:
+        return "intermediate"
+    return "intermediate"
+
+
+def _level_rubric(level: str) -> str:
+    if level == "fresher":
+        return (
+            "Candidate level: FRESHER / junior. Score relative to internships, coursework, "
+            "projects, and fundamentals — not senior production ownership. "
+            "Reward clear learning, basic correctness, and honest gaps. "
+            "Do not penalize missing multi-year ownership or large-scale systems experience. "
+            "Follow-up hints should stay easy–medium (clarify steps, what they tried, basics)."
+        )
+    if level == "senior":
+        return (
+            "Candidate level: SENIOR. Expect ownership, trade-offs, failure handling, "
+            "metrics, and system judgment. Weak answers that stay at tutorial level should "
+            "score lower. Follow-up hints may probe depth, scale, and decisions."
+        )
+    return (
+        "Candidate level: INTERMEDIATE. Expect solid hands-on examples with some ownership "
+        "and reasoning. Balance fundamentals with practical depth. "
+        "Follow-up hints should be medium difficulty."
+    )
+
+
 def evaluate_answer_with_llama(
     *,
     question_text: str,
@@ -227,6 +260,7 @@ def evaluate_answer_with_llama(
     if is_non_answer(candidate_answer):
         return _non_answer_result()
     skills = [s for s in (skill_tags or []) if s]
+    level = _normalize_candidate_level(context.get("candidate_level"))
     web_snippets: list[dict[str, str]] = []
     if use_web:
         query = " ".join(
@@ -265,6 +299,7 @@ def evaluate_answer_with_llama(
             candidate_answer=candidate_answer,
             skill_tags=skills,
             web_snippets=web_snippets,
+            candidate_level=level,
         )
         return result.model_copy(update={"chroma_examples": chroma_labels})
 
@@ -273,13 +308,16 @@ def evaluate_answer_with_llama(
         "Score the candidate answer using the interview question, resume evidence, "
         "job description requirements, similar past answers (yardstick), "
         "and optional internet research snippets. "
-        "If similar STRONG examples are close, require comparable concreteness. "
+        "Calibrate expectations to the stated candidate level (fresher vs intermediate vs senior). "
+        "If similar STRONG examples are close, require comparable concreteness for that level. "
         "If similar WEAK examples are close, do not inflate the score. "
         "Scoring rules: "
         "an answer that is only 'I don't know', 'sorry I don't know', skip, "
         "no idea, or equivalent with no real content MUST score 0 and verdict "
         "insufficient — never give consolation points such as 20 or 35. "
         "Only score above 0 if the candidate actually attempted the question. "
+        "followup_hints must be NEW spoken probes grounded in THIS answer's gaps — "
+        "never generic rephrases of the original question. "
         "Return JSON with keys: score (0-100), verdict "
         "(strong|adequate|weak|insufficient|off_topic), strengths (array), "
         "gaps (array), resume_alignment (string), jd_alignment (string), "
@@ -287,7 +325,9 @@ def evaluate_answer_with_llama(
         "for the interviewer on what to ask next), suggested_next_focus (string), "
         "suggest_followup (boolean), followup_hints (array of short probes)."
     )
-    user = f"""Question:
+    user = f"""{_level_rubric(level)}
+
+Question:
 {question_text}
 
 Candidate answer:
@@ -296,6 +336,7 @@ Candidate answer:
 Skill tags: {", ".join(skills) or "n/a"}
 
 Job position: {context.get("job_position") or "n/a"}
+Candidate level: {level}
 Resume score (ATS): {context.get("resume_score") or "n/a"}
 Resume summary:
 {context.get("resume_summary") or "n/a"}
@@ -350,6 +391,7 @@ Similar past answers (scoring yardstick):
             candidate_answer=candidate_answer,
             skill_tags=skills,
             web_snippets=web_snippets,
+            candidate_level=level,
         )
         return result.model_copy(update={"chroma_examples": chroma_labels})
 
@@ -360,7 +402,9 @@ def _heuristic_evaluation(
     candidate_answer: str,
     skill_tags: list[str],
     web_snippets: list[dict[str, str]],
+    candidate_level: str = "intermediate",
 ) -> EvaluationResult:
+    level = _normalize_candidate_level(candidate_level)
     answer = (candidate_answer or "").strip()
     if is_non_answer(answer):
         return _non_answer_result()
@@ -405,10 +449,17 @@ def _heuristic_evaluation(
         ),
         suggested_next_focus=skill_tags[0] if skill_tags else "concrete outcomes",
         suggest_followup=verdict == "weak" and words >= 40,
-        followup_hints=[
-            "Ask for metrics or outcome.",
-            "Ask what they personally owned vs the team.",
-        ],
+        followup_hints=(
+            [
+                "Ask what they tried first on that project.",
+                "Ask which concept they found hardest to apply.",
+            ]
+            if level == "fresher"
+            else [
+                "Ask for a concrete metric or outcome.",
+                "Ask what they would change next time.",
+            ]
+        ),
         model="heuristic",
         provider="fallback",
     )

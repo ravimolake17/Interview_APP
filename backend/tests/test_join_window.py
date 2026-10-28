@@ -88,18 +88,33 @@ def test_rejoin_allowed_within_first_start_plus_duration():
 
 def test_rejoin_blocked_after_allotted_duration():
     tz = ZoneInfo("Asia/Kolkata")
+    # Rejoin window = duration + grace (max(15, duration)); 30+30 = 60 min from start.
     with pytest.raises(HTTPException) as exc:
         assert_candidate_entry_allowed(
             scheduled_date=date(2026, 9, 24),
             scheduled_time=time(10, 0),
             duration_minutes=30,
             tz_name="Asia/Kolkata",
-            now=datetime(2026, 9, 24, 11, 0, tzinfo=tz),
+            now=datetime(2026, 9, 24, 12, 0, tzinfo=tz),
             first_started_at=datetime(2026, 9, 24, 10, 30, tzinfo=tz),
             room_visit_open=False,
         )
     assert exc.value.status_code == 410
     assert "no longer rejoin" in str(exc.value.detail).lower()
+
+
+def test_active_agent5_session_not_killed_past_deadline():
+    tz = ZoneInfo("Asia/Kolkata")
+    assert_candidate_entry_allowed(
+        scheduled_date=date(2026, 9, 24),
+        scheduled_time=time(10, 0),
+        duration_minutes=30,
+        tz_name="Asia/Kolkata",
+        now=datetime(2026, 9, 24, 11, 20, tzinfo=tz),
+        first_started_at=datetime(2026, 9, 24, 10, 30, tzinfo=tz),
+        room_visit_open=False,
+        session_status="active",
+    )
 
 
 def test_rejoin_blocked_hours_or_days_later():

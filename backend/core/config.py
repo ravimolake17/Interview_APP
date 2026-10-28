@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = "storage/chroma"
     chroma_seed_on_startup: bool = True
 
+    # Redis — interview speed cache (questions, TTS, eval queue). Empty = in-memory fallback.
+    redis_url: str = ""
+    # When true, live turns advance without waiting for Agent 6; eval runs in background.
+    interview_async_eval: bool = True
+
     # JWT authentication
     jwt_secret_key: str = "change-me-in-production-use-long-random-string"
     jwt_algorithm: str = "HS256"

@@ -403,7 +403,14 @@ class ApplicationSettingsService:
         self, company_id: int | None = None
     ) -> InterviewAvailabilitySettings:
         row = await self._company_row("interview_availability", company_id)
-        return InterviewAvailabilitySettings.model_validate(row.data if row else {})
+        if row:
+            return InterviewAvailabilitySettings.model_validate(row.data)
+        # Fall back to INTERVIEW_DURATION_MINUTES from env when company hours unset.
+        from core.config import get_settings
+
+        minutes = int(get_settings().interview_duration_minutes or 30)
+        minutes = max(15, min(120, minutes))
+        return InterviewAvailabilitySettings(slot_minutes=minutes)
 
     async def save_interview_availability(
         self,

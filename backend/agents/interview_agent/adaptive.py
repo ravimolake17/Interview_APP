@@ -181,6 +181,7 @@ def _call_llm_question_batch(
     job_title: str,
     role_family: str,
     resume_context: dict[str, str],
+    candidate_level: str | None = None,
 ) -> list[dict[str, Any]]:
     preview = [
         {
@@ -194,6 +195,15 @@ def _call_llm_question_batch(
         }
         for s in batch
     ]
+    level = str(candidate_level or resume_context.get("candidate_level") or "").strip().lower()
+    juniorish = level in {"fresher", "entry", "entry_level", "junior", "intern", "internship"}
+    level_rules = (
+        "- Candidate level is fresher/junior: prefer easy–medium, fundamentals, coursework, "
+        "internships, and small projects. Do NOT ask senior system-design, multi-region "
+        "scale, or deep production ops questions unless the slot difficulty is already hard.\n"
+        if juniorish
+        else "- Match question depth to the slot difficulty and candidate experience.\n"
+    )
     system = (
         "You are a hiring manager with 15 years of experience running live technical interviews. "
         "Write professional spoken questions like ChatGPT would for a real interview — specific, "
@@ -203,6 +213,7 @@ def _call_llm_question_batch(
         "- One question, one '?', max 42 words, natural speech.\n"
         "- Never use resume bio/objective wording; never markdown (#).\n"
         "- Intro category: motivation/background only (no tool names).\n"
+        f"{level_rules}"
         "- Skills/projects: invent a concrete scenario matching probe_type "
         "(scale = burst load / large files / concurrency; failure = outage/bug; "
         "tradeoff = design choice; ownership = what they personally built; "
@@ -216,6 +227,7 @@ def _call_llm_question_batch(
     )
     user = (
         f"Job title: {job_title or resume_context.get('job_position') or 'role'}\n"
+        f"Candidate level: {level or 'unspecified'}\n"
         f"Role family: {role_family or 'general'}\n"
         f"Skills: {resume_context.get('skills') or 'n/a'}\n"
         f"JD requirements: {resume_context.get('jd_requirements') or 'n/a'}\n"
@@ -237,6 +249,7 @@ def _llm_spoken_questions_from_plan(
     job_title: str,
     role_family: str,
     resume_context: dict[str, str],
+    candidate_level: str | None = None,
 ) -> list[InterviewQuestion] | None:
     if not slots:
         return None
@@ -259,6 +272,7 @@ def _llm_spoken_questions_from_plan(
                     job_title=job_title,
                     role_family=role_family,
                     resume_context=resume_context,
+                    candidate_level=candidate_level,
                 )
             except Exception:
                 logger.exception(
@@ -271,6 +285,7 @@ def _llm_spoken_questions_from_plan(
                     job_title=job_title,
                     role_family=role_family,
                     resume_context=resume_context,
+                    candidate_level=candidate_level,
                 )
             for item in items:
                 try:
@@ -377,11 +392,28 @@ def _llm_spoken_questions_from_plan(
         return None
 
 
+def _soften_slots_for_level(
+    slots: list[QuestionPlanSlot],
+    candidate_level: str | None,
+) -> list[QuestionPlanSlot]:
+    level = str(candidate_level or "").strip().lower()
+    if level not in {"fresher", "entry", "entry_level", "junior", "intern", "internship"}:
+        return slots
+    softened: list[QuestionPlanSlot] = []
+    for slot in slots:
+        if str(slot.difficulty or "").lower() != "hard":
+            softened.append(slot)
+            continue
+        softened.append(slot.model_copy(update={"difficulty": "medium"}))
+    return softened
+
+
 def generate_questions_with_llama(
     blueprint: dict[str, Any],
     *,
     job_title: str | None = None,
     resume_context: dict[str, str] | None = None,
+    candidate_level: str | None = None,
 ) -> list[InterviewQuestion]:
     """LLM-primary spoken questions from Agent 3 question_plan; templates only as fallback.
 
@@ -392,14 +424,20 @@ def generate_questions_with_llama(
     role = (job_title or ctx.get("job_position") or _as_dict(blueprint.get("input_summary")).get("job_title") or "the role")
     role = str(role).strip() or "the role"
     role_family = str(blueprint.get("role_family") or "general")
+    level = (
+        candidate_level
+        or blueprint.get("candidate_level")
+        or ctx.get("candidate_level")
+    )
 
-    slots = _plan_slots_from_blueprint(blueprint)
+    slots = _soften_slots_for_level(_plan_slots_from_blueprint(blueprint), level)
     if slots:
         llm_questions = _llm_spoken_questions_from_plan(
             slots,
             job_title=role,
             role_family=role_family,
             resume_context=ctx,
+            candidate_level=str(level) if level else None,
         )
         if llm_questions:
             return llm_questions
@@ -488,6 +526,20 @@ def generate_questions_with_llama(
         return base
 
 
+def _followup_level_guidance(level: str | None) -> str:
+    normalized = str(level or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"fresher", "entry", "entry_level", "junior", "intern", "internship"}:
+        return (
+            "Candidate is a FRESHER/junior. Ask simple clarifying probes about what they "
+            "tried, what they learned, or one concrete step — not senior architecture."
+        )
+    if normalized in {"senior", "lead", "principal", "staff", "architect"}:
+        return (
+            "Candidate is SENIOR. Probe trade-offs, ownership, failure modes, and measurable impact."
+        )
+    return "Candidate is INTERMEDIATE. Probe practical depth and one concrete decision."
+
+
 def generate_adaptive_followups(
     *,
     question_id: str,
@@ -496,45 +548,61 @@ def generate_adaptive_followups(
     evaluation: dict[str, Any] | None,
     skill_hints: list[str] | None = None,
     max_followups: int = 2,
+    already_asked: set[str] | None = None,
+    candidate_level: str | None = None,
 ) -> list[FollowUpQuestion]:
-    """Prefer LLM follow-ups from Agent 6 gaps; template probes only as fallback."""
-    base = generate_followups(
-        question_id=question_id,
-        question_text=question_text,
-        candidate_answer=candidate_answer,
-        max_followups=max_followups,
-        skill_hints=skill_hints,
-    )
-    if not llama_available():
-        return base
-
+    """LLM-first follow-ups from Agent 6 evaluation; templates only if LLM fails."""
+    used = {k.casefold() for k in (already_asked or set())}
     eval_data = evaluation or {}
+
+    def _template_fallback() -> list[FollowUpQuestion]:
+        return generate_followups(
+            question_id=question_id,
+            question_text=question_text,
+            candidate_answer=candidate_answer,
+            max_followups=max_followups,
+            skill_hints=skill_hints,
+            already_asked=used,
+        )
+
+    if not llama_available():
+        return _template_fallback()
+
+    already_list = sorted(used)[:12]
+    hints = list(eval_data.get("followup_hints") or [])
     system = (
         "You are Agent 4 on a live voice interview. "
+        "Agent 6 already scored the answer. Your job is ONLY to invent NEW follow-up "
+        "questions from that evaluation — grounded in the candidate's words and gaps. "
         "If the candidate did not really answer, return {\"follow_ups\": []}. "
-        "Do not rephrase the original question. "
-        "Write up to N NEW short spoken probes (max 22 words each) that dig into "
-        "Agent 6 gaps, missing ownership, scale/limits, failure handling, or trade-offs. "
+        "Do NOT rephrase the original question. "
+        "Do NOT ask a generic 'contribution versus the team' probe unless Agent 6 "
+        "explicitly flagged missing ownership AND that topic was not already asked. "
+        "Never repeat anything in Already asked. "
+        "Write up to N short spoken probes (max 22 words each). "
         "Return JSON: {\"follow_ups\": [{\"question_text\":\"...\",\"reason\":\"...\","
         "\"difficulty\":\"easy|medium|hard\"}] }"
     )
     user = (
+        f"{_followup_level_guidance(candidate_level)}\n\n"
         f"Original question:\n{question_text}\n\n"
         f"Candidate answer:\n{candidate_answer}\n\n"
         f"Agent 6 score: {eval_data.get('score')}\n"
         f"Agent 6 verdict: {eval_data.get('verdict')}\n"
         f"Gaps: {eval_data.get('gaps')}\n"
+        f"Strengths: {eval_data.get('strengths')}\n"
         f"Feedback for Agent 4: {eval_data.get('feedback_for_agent4')}\n"
-        f"Follow-up hints: {eval_data.get('followup_hints')}\n"
+        f"Agent 6 follow-up hints (prefer these themes):\n{hints}\n"
         f"Suggested focus: {eval_data.get('suggested_next_focus')}\n"
         f"Skill hints: {skill_hints or []}\n"
+        f"Already asked (do not repeat):\n{already_list}\n"
         f"Max follow-ups: {max_followups}"
     )
     try:
         data = call_llama_json(system, user, temperature=0.35, max_tokens=900)
         items = data.get("follow_ups") if isinstance(data, dict) else None
         if not isinstance(items, list) or not items:
-            return base
+            return _template_fallback()
         out: list[FollowUpQuestion] = []
         for item in items[:max_followups]:
             if not isinstance(item, dict):
@@ -542,8 +610,17 @@ def generate_adaptive_followups(
             text = shorten_question(str(item.get("question_text") or "").strip(), FOLLOWUP_MAX_WORDS)
             if len(text) < 12 or looks_like_resume_summary(text.rstrip("?")):
                 continue
+            key = text.casefold()
+            if key in used or any(prev in key or key in prev for prev in used if len(prev) > 20):
+                continue
+            if "contribution versus" in key or "versus the team" in key:
+                if any("ownership" in u or "versus the team" in u for u in used):
+                    continue
             difficulty = str(item.get("difficulty") or "medium").lower()
             if difficulty not in {"easy", "medium", "hard"}:
+                difficulty = "medium"
+            level = str(candidate_level or "").lower()
+            if level in {"fresher", "junior", "entry", "intern"} and difficulty == "hard":
                 difficulty = "medium"
             out.append(
                 FollowUpQuestion(
@@ -554,10 +631,11 @@ def generate_adaptive_followups(
                     difficulty=difficulty,  # type: ignore[arg-type]
                 )
             )
-        return out or base
+            used.add(key)
+        return out or _template_fallback()
     except Exception:
         logger.exception("Adaptive follow-up generation failed")
-        return base
+        return _template_fallback()
 
 
 def adapt_next_question(

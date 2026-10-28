@@ -35,12 +35,13 @@ def require_candidate_session(
     if str(payload.get("sub", "")) != session.candidate_id:
         raise HTTPException(status_code=401, detail="candidate token is not bound to this session")
     if str(payload.get("participant_role") or "candidate").lower() != "hr":
-        # Always enforce: continuous open visit OK; rejoin only until first_start+duration.
+        # Continuous open / active Agent5 sessions must not be time-killed mid-interview.
         from services.join_token_service import enforce_rr_candidate_join_window
 
         enforce_rr_candidate_join_window(
             str(payload.get("rr_candidate_id") or ""),
             session_started_at=getattr(session, "started_at", None),
+            session_status=getattr(session, "status", None),
         )
     return session
 

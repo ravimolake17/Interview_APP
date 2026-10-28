@@ -94,6 +94,21 @@ def parse_runtime_datetime(value: object, *, tz_name: str | None = None) -> date
     return dt.astimezone(_company_tz(tz_name))
 
 
+_ACTIVE_SESSION_STATUSES = frozenset(
+    {
+        "ready",
+        "active",
+        "terminating",
+        "device_checked",
+        "face_enrolled",
+        "face_enrollment_pending",
+        "face_verified",
+        "voice_enrolled",
+        "initial_voice_verified",
+    }
+)
+
+
 def assert_candidate_entry_allowed(
     *,
     scheduled_date: date,
@@ -103,12 +118,13 @@ def assert_candidate_entry_allowed(
     now: datetime | None = None,
     room_visit_open: bool = False,
     first_started_at: datetime | None = None,
+    session_status: str | None = None,
 ) -> None:
     """Gate first join and rejoin without ending a continuous live session.
 
     Rules:
-    - Open room visit (still in the meeting): always allow — interview may overrun.
-    - Already started once, then left: allow only until first_start + duration.
+    - Open room visit or active Agent5 session: always allow — interview may overrun.
+    - Already started once, then left: allow until first_start + duration (+ grace).
     - Never started: allow only in the scheduled join window.
     """
     from fastapi import HTTPException
@@ -125,7 +141,8 @@ def assert_candidate_entry_allowed(
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=_company_tz(tz_name))
 
-    if room_visit_open:
+    status = str(session_status or "").strip().lower()
+    if room_visit_open or status in _ACTIVE_SESSION_STATUSES:
         return
 
     if first_started_at is not None:
@@ -133,7 +150,10 @@ def assert_candidate_entry_allowed(
         if started.tzinfo is None:
             started = started.replace(tzinfo=timezone.utc)
         started = started.astimezone(_company_tz(tz_name))
-        deadline = rejoin_closes_at(started, duration)
+        # Grace so a 15–30 min planned interview is not cut mid-answer if the
+        # tab briefly lost room_visit_open (refresh / network blip).
+        grace = max(15, duration)
+        deadline = rejoin_closes_at(started, duration + grace)
         if clock >= deadline:
             raise HTTPException(status_code=410, detail=rejoin_closed_message(deadline))
         return
@@ -220,11 +240,12 @@ def enforce_rr_candidate_join_window(
     candidate_id: str,
     *,
     session_started_at: datetime | None = None,
+    session_status: str | None = None,
 ) -> None:
     """Block Agent 5 candidate APIs outside first-join / rejoin rules.
 
-    Continuous open visits are not time-killed. Rejoin after leave is limited to
-    first_start + assigned duration (hours/days later is blocked).
+    Continuous open visits / active Agent5 sessions are not time-killed.
+    Rejoin after leave is limited to first_start + duration (+ grace).
     """
     from fastapi import HTTPException
 
@@ -287,6 +308,7 @@ def enforce_rr_candidate_join_window(
         tz_name=tz_name,
         room_visit_open=room_visit_open,
         first_started_at=first_started,
+        session_status=session_status,
     )
 
 

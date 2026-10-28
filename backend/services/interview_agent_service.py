@@ -227,6 +227,7 @@ class InterviewAgentService:
             blueprint,
             job_title=blueprint_row.job_title or candidate.job_position,
             resume_context=resume_context,
+            candidate_level=blueprint_row.candidate_level,
         )
         if not questions:
             raise ValueError("Could not generate questions from the blueprint.")
@@ -252,6 +253,7 @@ class InterviewAgentService:
         # Clear previous audio for this candidate when regenerating.
         await self.tts_cache.clear_for_candidate(candidate_id)
 
+        questions_json = [q.model_dump(mode="json") for q in questions]
         row = await self.questions_repo.create(
             candidate_id=candidate_id,
             blueprint_id=blueprint_row.id,
@@ -259,9 +261,15 @@ class InterviewAgentService:
             candidate_level=blueprint_row.candidate_level,
             total_questions=len(questions),
             total_duration_minutes=int(duration) if duration is not None else None,
-            questions_json=[q.model_dump(mode="json") for q in questions],
+            questions_json=questions_json,
             company_id=candidate.company_id,
         )
+        try:
+            from services.interview_speed_cache import cache_question_bank
+
+            cache_question_bank(candidate_id, questions_json)
+        except Exception:
+            logger.debug("Question bank Redis cache skipped", exc_info=True)
         return await self._to_response(row)
 
     async def get_question_edit_policy(

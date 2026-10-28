@@ -117,7 +117,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("TTS warmup could not be scheduled", exc_info=True)
 
+    try:
+        from core.redis_client import get_redis, using_memory_fallback
+        from services.interview_eval_queue import start_interview_eval_worker
+
+        get_redis()
+        await start_interview_eval_worker()
+        logger.info(
+            "Interview async eval worker ready (redis_memory_fallback=%s)",
+            using_memory_fallback(),
+        )
+    except Exception:
+        logger.warning("Interview eval worker could not start", exc_info=True)
+
     yield
+    try:
+        from services.interview_eval_queue import stop_interview_eval_worker
+
+        await stop_interview_eval_worker()
+    except Exception:
+        logger.debug("Interview eval worker shutdown skipped", exc_info=True)
     await shutdown_langgraph_runtime()
     try:
         shutdown_chroma_runtime()

@@ -58,6 +58,9 @@ chromadb>=1.0.0
 # Docling layout model needs rt_detr_v2 (transformers 4.51+). Stay below 5.x for FlagEmbedding.
 transformers>=4.51.0,<5.0.0
 
+# Redis — interview speed cache / async eval queue (optional; memory fallback if down)
+redis>=5.0.0,<6
+
 # Authentication
 PyJWT==2.10.1
 passlib[bcrypt]==1.7.4

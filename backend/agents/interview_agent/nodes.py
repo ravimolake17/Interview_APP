@@ -392,7 +392,100 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
     question_text = str(question.get("question_text") or "")
     question_id = str(question.get("id") or "unknown")
     is_followup = bool(question.get("is_followup"))
+    candidate_id = str(state.get("CandidateID") or "")
+    candidate_level = str(context.get("candidate_level") or "") or None
 
+    from core.config import get_settings
+
+    async_eval = bool(getattr(get_settings(), "interview_async_eval", True))
+
+    questions = list(state.get("Questions") or [])
+    index = int(state.get("CurrentIndex") or 0)
+    total = len(questions)
+    time_up = _time_up(state)
+    history = list(state.get("TurnHistory") or [])
+
+    # ── Fast path: enqueue Agent 6, advance bank, insert ready follow-ups later ──
+    if async_eval:
+        from services.interview_eval_queue import enqueue_answer_evaluation
+        from services.interview_speed_cache import (
+            init_followup_budget,
+            pop_pending_followup,
+        )
+
+        if candidate_id and not state.get("_FollowupBudgetReady"):
+            init_followup_budget(candidate_id, total)
+
+        enqueue_answer_evaluation(
+            {
+                "candidate_id": candidate_id,
+                "question": question,
+                "answer_text": answer,
+                "context": context,
+                "is_followup": is_followup,
+                "turn_history": history[-8:],
+            }
+        )
+
+        # After this answer: prefer a deferred follow-up from an earlier eval.
+        ready_fu = None if time_up else pop_pending_followup(candidate_id)
+        pending_followup = bool(ready_fu)
+        followup_payload = [ready_fu] if ready_fu else []
+
+        # Bank index always advances when leaving a bank question (or finishing a FU).
+        if is_followup:
+            next_index = index  # already points at next bank slot
+        else:
+            next_index = index + 1
+
+        history.append(
+            {
+                "question": question,
+                "answer_text": answer,
+                "evaluation": None,
+                "eval_pending": True,
+                "agent6_feedback": None,
+                "follow_ups": [],
+            }
+        )
+
+        remaining_after = max(0, total - next_index)
+        duration_extended = bool(state.get("DurationExtended")) or (
+            time_up and remaining_after > 0
+        )
+        done_bank = (not pending_followup) and next_index >= total
+        next_q: dict[str, Any] | None = None
+        if pending_followup and followup_payload:
+            next_q = followup_payload[0]
+        elif next_index < total:
+            next_q = questions[next_index]
+        elif done_bank:
+            next_q = {"category_name": "your questions", "skill_tags": []}
+
+        return {
+            "Questions": questions,
+            "TurnHistory": history,
+            "FollowUps": followup_payload if pending_followup else [],
+            "LatestEvaluation": None,
+            "Agent6Feedback": None,
+            "PendingFollowUpMode": pending_followup,
+            "CurrentIndex": next_index,
+            "RemainingQuestions": max(0, total - next_index) + (1 if pending_followup else 0),
+            "Status": "TURN_COMPLETE",
+            "InterviewPhase": "CANDIDATE_QNA" if done_bank else "QUESTIONS",
+            "DurationExtended": duration_extended,
+            "TurnAck": build_turn_ack(
+                evaluation=None,
+                next_question=next_q,
+                unanswered=should_treat_as_unanswered(answer, None),
+                next_is_followup=pending_followup,
+            ),
+            "Error": None,
+            "Model": llama_model_id(),
+            "_FollowupBudgetReady": True,
+        }
+
+    # ── Legacy sync path (INTERVIEW_ASYNC_EVAL=false) ──
     loop = asyncio.get_running_loop()
 
     def _evaluate():
@@ -405,26 +498,14 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             use_chroma=False,
         )
 
-    from agents.interview_agent.followup_generator import generate_followups
+    from agents.interview_agent.followup_generator import asked_followup_keys
 
-    def _draft_followups():
-        # Agent 4 drafts in parallel while Agent 6 evaluates.
-        return generate_followups(
-            question_id=question_id,
-            question_text=question_text,
-            candidate_answer=answer,
-            max_followups=1,
-            skill_hints=skill_tags,
-        )
+    prior_followups = asked_followup_keys(history)
 
-    # Parallel fan-out: Agent 6 evaluation ∥ Agent 4 draft follow-ups
-    evaluation, draft_followups = await asyncio.gather(
-        loop.run_in_executor(_executor, _evaluate),
-        loop.run_in_executor(_executor, _draft_followups),
-    )
+    evaluation = await loop.run_in_executor(_executor, _evaluate)
     eval_dict = evaluation.model_dump(mode="json")
 
-    def _refine_followups():
+    def _llm_followups():
         if not answer_warrants_followup(answer, eval_dict, is_followup=is_followup):
             return []
         refined = generate_adaptive_followups(
@@ -434,12 +515,13 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             evaluation=eval_dict,
             skill_hints=skill_tags,
             max_followups=1,
+            already_asked=prior_followups,
+            candidate_level=candidate_level,
         )
         return refined[:1]
 
-    followups = await loop.run_in_executor(_executor, _refine_followups)
+    followups = await loop.run_in_executor(_executor, _llm_followups)
 
-    history = list(state.get("TurnHistory") or [])
     history.append(
         {
             "question": question,
@@ -450,16 +532,11 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
         }
     )
 
-    questions = list(state.get("Questions") or [])
-    index = int(state.get("CurrentIndex") or 0)
-    time_up = _time_up(state)
     remaining_after = max(0, len(questions) - (index + (0 if is_followup else 1)))
     duration_extended = bool(state.get("DurationExtended")) or (
         time_up and remaining_after > 0
     )
 
-    # Stay on the planned bank. Rephrase only when the candidate actually answered
-    # but left a useful gap — never when they skipped or gave no answer.
     next_index = index
     pending_followup = False
     followup_payload = [fu.model_dump(mode="json") for fu in followups]
@@ -482,9 +559,8 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
         followup_payload = []
         next_index = index + 1
 
-    total = len(questions)
     done_bank = (not pending_followup) and next_index >= total
-    next_q: dict[str, Any] | None = None
+    next_q = None
     if pending_followup and followup_payload:
         next_q = followup_payload[0]
     elif next_index < total:

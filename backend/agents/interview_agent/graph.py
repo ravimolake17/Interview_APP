@@ -1,8 +1,8 @@
 """
-Agent 4 LangGraph workflow — live interview turn loop with parallel Agent 6.
+Agent 4 LangGraph workflow — live interview turn loop with Agent 6.
 
 START → load_session → present_question → wait_for_answer (interrupt)
-     → process_answer_parallel (Agent 6 eval ∥ Agent 4 follow-ups)
+     → process_answer_parallel (Agent 6 eval → LLM follow-ups from gaps)
      → (more?) present_question : complete → END
 
 Enterprise notes:
@@ -102,7 +102,12 @@ class InterviewLangGraphAgent:
     def _config(self, candidate_id: str) -> dict[str, Any]:
         return thread_config("interview", candidate_id)
 
-    async def _evaluation_context(self, candidate_id: str) -> dict[str, str]:
+    async def _evaluation_context(
+        self,
+        candidate_id: str,
+        *,
+        candidate_level: str | None = None,
+    ) -> dict[str, str]:
         candidate = await self.service.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
             return {}
@@ -115,12 +120,20 @@ class InterviewLangGraphAgent:
         from services.interview_brief_service import load_interview_reference_briefs
 
         briefs = await load_interview_reference_briefs(self.db, candidate)
+        level = candidate_level
+        if not level:
+            try:
+                blueprint = await self.service.blueprint_repo.get_latest_for_candidate(candidate_id)
+                level = getattr(blueprint, "candidate_level", None) if blueprint else None
+            except Exception:
+                level = None
         context.update(
             {
                 "company_intro": briefs.get("company_intro") or "",
                 "department_name": briefs.get("department_name") or "",
                 "department_brief": briefs.get("department_brief") or "",
                 "role_summary": briefs.get("role_summary") or "",
+                "candidate_level": str(level or "").strip(),
             }
         )
         return context
@@ -130,14 +143,25 @@ class InterviewLangGraphAgent:
         question_set = await self.service.generate_questions(
             candidate_id, force=force_questions
         )
-        context = await self._evaluation_context(candidate_id)
+        context = await self._evaluation_context(
+            candidate_id,
+            candidate_level=getattr(question_set, "candidate_level", None),
+        )
         duration = question_set.total_duration_minutes
         if duration is None:
             duration = await self.service.default_duration_minutes()
+        questions_payload = [q.model_dump(mode="json") for q in question_set.questions]
+        try:
+            from services.interview_speed_cache import cache_question_bank, init_followup_budget
+
+            cache_question_bank(candidate_id, questions_payload)
+            init_followup_budget(candidate_id, len(questions_payload))
+        except Exception:
+            logger.debug("Interview speed cache warm skipped", exc_info=True)
         initial: InterviewAgentState = {
             "CandidateID": candidate_id,
             "QuestionSetId": question_set.id,
-            "Questions": [q.model_dump(mode="json") for q in question_set.questions],
+            "Questions": questions_payload,
             "CurrentIndex": 0,
             "TurnHistory": [],
             "EvaluationContext": context,
@@ -150,6 +174,7 @@ class InterviewLangGraphAgent:
             "CandidateQnaTurns": 0,
             "PendingAiReply": None,
             "TurnAck": None,
+            "_FollowupBudgetReady": True,
         }
         result = await ainvoke_graph(self.graph, initial, config=self._config(candidate_id))
         await self._maybe_run_agent7(candidate_id, result)

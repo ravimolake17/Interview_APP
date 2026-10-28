@@ -83,6 +83,12 @@ class InterviewTTSCacheService:
             try:
                 result = await asyncio.to_thread(synthesize_speech, text)
                 rel = write_audio_file(candidate_id, qid, result["audio_bytes"])
+                try:
+                    from services.interview_speed_cache import cache_tts_audio
+
+                    cache_tts_audio(candidate_id, qid, result["audio_bytes"])
+                except Exception:
+                    logger.debug("Redis TTS cache skipped for %s", qid, exc_info=True)
                 await self.audio_repo.upsert_ready(
                     candidate_id=candidate_id,
                     question_set_id=question_set_id,
@@ -141,12 +147,34 @@ class InterviewTTSCacheService:
     ) -> dict[str, Any] | None:
         """Return cached audio bytes if available for question_id (preferred) or text hash."""
         if question_id:
+            try:
+                from services.interview_speed_cache import get_cached_tts_audio
+
+                hot = get_cached_tts_audio(candidate_id, question_id)
+                if hot:
+                    return {
+                        "audio_bytes": hot,
+                        "content_type": "audio/wav",
+                        "provider": "redis_cache",
+                        "model": TTS_MODEL,
+                        "voice": TTS_VOICE,
+                        "cached": True,
+                        "question_id": question_id,
+                    }
+            except Exception:
+                logger.debug("Redis TTS read skipped", exc_info=True)
             row = await self.audio_repo.get_ready_for_candidate_question(
                 candidate_id=candidate_id, question_id=question_id
             )
             if row:
                 data = read_audio_file(row.file_path)
                 if data:
+                    try:
+                        from services.interview_speed_cache import cache_tts_audio
+
+                        cache_tts_audio(candidate_id, question_id, data)
+                    except Exception:
+                        pass
                     return {
                         "audio_bytes": data,
                         "content_type": row.content_type or "audio/wav",
@@ -166,3 +194,9 @@ class InterviewTTSCacheService:
 
     async def clear_for_candidate(self, candidate_id: str) -> None:
         delete_candidate_audio(candidate_id)
+        try:
+            from services.interview_speed_cache import clear_candidate_speed_cache
+
+            clear_candidate_speed_cache(candidate_id)
+        except Exception:
+            logger.debug("Speed cache clear skipped", exc_info=True)

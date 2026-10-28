@@ -19,6 +19,17 @@ _THIN_ANSWER = re.compile(
     re.IGNORECASE,
 )
 
+_OWNERSHIP_PROBE = (
+    "You mentioned working with others — what was specifically your contribution versus the team's?"
+)
+_OWNERSHIP_REASON = "Clarify individual ownership."
+
+_PERSONAL_OWNERSHIP = re.compile(
+    r"\b(i\s+(built|wrote|owned|led|designed|implemented|developed|created|handled|"
+    r"was responsible|took ownership|my (role|part|contribution|responsibility)))\b",
+    re.IGNORECASE,
+)
+
 
 def answer_is_thin(text: str) -> bool:
     cleaned = (text or "").strip()
@@ -118,6 +129,37 @@ def _sentences(text: str) -> list[str]:
     return [p.strip() for p in parts if len(p.strip()) > 12]
 
 
+def asked_followup_keys(turn_history: list[dict[str, Any]] | None) -> set[str]:
+    """Normalize previously asked follow-up texts/reasons so we never repeat them."""
+    keys: set[str] = set()
+    for turn in turn_history or []:
+        question = turn.get("question") or {}
+        if question.get("is_followup"):
+            text = str(question.get("question_text") or "").strip().casefold()
+            if text:
+                keys.add(text)
+            reason = str(question.get("reason") or "").strip().casefold()
+            if reason:
+                keys.add(f"reason:{reason}")
+        for fu in turn.get("follow_ups") or []:
+            text = str(fu.get("question_text") or "").strip().casefold()
+            if text:
+                keys.add(text)
+            reason = str(fu.get("reason") or "").strip().casefold()
+            if reason:
+                keys.add(f"reason:{reason}")
+    return keys
+
+
+def _mentions_team_without_ownership(answer: str) -> bool:
+    lower = answer.lower()
+    if not any(w in lower for w in ("we ", " our team", "the team", "teammate", "colleagues")):
+        return False
+    if _PERSONAL_OWNERSHIP.search(answer):
+        return False
+    return True
+
+
 def generate_followups(
     *,
     question_id: str,
@@ -125,6 +167,7 @@ def generate_followups(
     candidate_answer: str,
     max_followups: int = 2,
     skill_hints: list[str] | None = None,
+    already_asked: set[str] | None = None,
 ) -> list[FollowUpQuestion]:
     """Create adaptive follow-ups from the transcribed answer (rule + template)."""
     answer = (candidate_answer or "").strip()
@@ -135,17 +178,21 @@ def generate_followups(
     sentences = _sentences(answer)
     skills = [s for s in (skill_hints or []) if s][:3]
     lower = answer.lower()
+    used = {k.casefold() for k in (already_asked or set())}
 
     probes: list[tuple[str, str, str]] = []
 
-    if any(w in lower for w in ("we ", "team", "they ")):
-        probes.append(
-            (
-                "You mentioned working with others — what was specifically your contribution versus the team's?",
-                "Clarify individual ownership.",
-                "medium",
-            )
-        )
+    # Hardcoded ownership probe — only once per interview, and only when team
+    # language appears without a clear personal contribution.
+    ownership_key = _OWNERSHIP_PROBE.casefold()
+    ownership_reason_key = f"reason:{_OWNERSHIP_REASON.casefold()}"
+    if (
+        ownership_key not in used
+        and ownership_reason_key not in used
+        and _mentions_team_without_ownership(answer)
+    ):
+        probes.append((_OWNERSHIP_PROBE, _OWNERSHIP_REASON, "medium"))
+
     if any(w in lower for w in ("challenge", "issue", "problem", "bug", "fail")):
         probes.append(
             (
@@ -190,12 +237,14 @@ def generate_followups(
             )
         )
 
-    seen: set[str] = set()
+    seen: set[str] = set(used)
     for text, reason, difficulty in probes:
         key = text.casefold()
-        if key in seen:
+        reason_key = f"reason:{reason.casefold()}"
+        if key in seen or reason_key in seen:
             continue
         seen.add(key)
+        seen.add(reason_key)
         followups.append(
             FollowUpQuestion(
                 id=f"fu-{uuid.uuid4().hex[:10]}",
