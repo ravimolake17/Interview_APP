@@ -3,7 +3,7 @@
 --   psql -h 127.0.0.1 -p 5432 -U postgres -d interview_scheduler -f backend/scripts/delete_candidate.sql
 --
 -- Change this id before running:
-\set candidate_id 'CAND-B31476C2'
+\set candidate_id ''
 
 \echo 'Preview candidate:'
 SELECT candidate_id, full_name, email, status, job_position, created_at
