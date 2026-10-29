@@ -37,6 +37,7 @@ from api.routes import (
 )
 from core.config import get_settings
 from core.database import AsyncSessionLocal, engine
+from core.spa_fallback import spa_path_is_api_or_static
 from agents.screening_agent.config import settings as screening_settings
 from agents.screening_agent.routes.candidates import router as screening_candidates_router
 from agents.screening_agent.routes.extract import router as extract_router
@@ -442,30 +443,13 @@ def _mount_hr_spa() -> None:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets), html=False), name="hr-assets")
 
-    skip_prefixes = (
-        "api/",
-        "docs",
-        "redoc",
-        "openapi.json",
-        "health",
-        "ready",
-        "screening",
-        "screening-files",
-        "proctoring",
-        "monitor",
-        "candidate",
-        "extract",
-        "ws/",
-        "ui/",
-    )
-
     @app.get("/{full_path:path}")
     async def hr_spa(full_path: str):
-        if full_path.startswith(skip_prefixes) or full_path in {"docs", "redoc", "openapi.json"}:
+        if spa_path_is_api_or_static(full_path):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        candidate = dist / full_path
-        if candidate.is_file():
-            return FileResponse(candidate)
+        static_file = dist / full_path
+        if static_file.is_file():
+            return FileResponse(static_file)
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
 
