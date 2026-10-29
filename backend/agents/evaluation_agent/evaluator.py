@@ -87,7 +87,15 @@ def is_non_answer(text: str) -> bool:
     if not raw:
         return True
     lowered = raw.lower()
-    if lowered in {"not answered", "[skipped by hr]", "skipped", "n/a", "na", "-"}:
+    if lowered in {
+        "not answered",
+        "[skipped by hr]",
+        "[no response]",
+        "skipped",
+        "n/a",
+        "na",
+        "-",
+    }:
         return True
     compact = re.sub(r"[^a-z0-9'\s]+", " ", lowered)
     compact = re.sub(r"\s+", " ", compact).strip()

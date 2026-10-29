@@ -158,13 +158,23 @@ export type SilenceMonitor = { stop: () => void }
 export function startSilenceMonitor(
   stream: MediaStream,
   onSilence: () => void,
-  options?: { silenceMs?: number; threshold?: number; minSpeechMs?: number },
+  options?: {
+    silenceMs?: number
+    threshold?: number
+    minSpeechMs?: number
+    /** If the candidate never speaks, call onNoSpeech after this many ms (default 8s think time). */
+    noSpeechTimeoutMs?: number
+    onNoSpeech?: () => void
+  },
 ): SilenceMonitor {
   // Production gap after speech ends (~2.4s). Uses adaptive noise/peak so fans
   // and room hum do not keep "listening" forever.
   const silenceMs = options?.silenceMs ?? 2400
   const minThreshold = options?.threshold ?? 0.014
   const minSpeechMs = options?.minSpeechMs ?? 1200
+  const noSpeechTimeoutMs = options?.noSpeechTimeoutMs ?? 8000
+  const onNoSpeech = options?.onNoSpeech
+  const startedAt = Date.now()
   const ctx = new AudioContext()
   const analyser = ctx.createAnalyser()
   analyser.fftSize = 2048
@@ -182,6 +192,13 @@ export function startSilenceMonitor(
   let frameId = 0
   let stopped = false
 
+  const finish = (kind: 'silence' | 'no_speech') => {
+    if (stopped) return
+    stopped = true
+    if (kind === 'no_speech' && onNoSpeech) onNoSpeech()
+    else onSilence()
+  }
+
   const tick = () => {
     if (stopped) return
     const data = new Uint8Array(analyser.fftSize)
@@ -193,6 +210,12 @@ export function startSilenceMonitor(
     }
     const rms = Math.sqrt(sum / data.length)
     const now = Date.now()
+
+    // Give candidates think time; skip only after noSpeechTimeoutMs with no real speech.
+    if (!speechDetected && now - startedAt >= noSpeechTimeoutMs) {
+      finish('no_speech')
+      return
+    }
 
     // Learn ambient level (fans / AC) so absolute thresholds do not stick open.
     if (now < calibratedUntil || rms < noiseFloor * 1.35) {
@@ -220,8 +243,7 @@ export function startSilenceMonitor(
       } else if (!silenceStart) {
         silenceStart = now
       } else if (now - silenceStart >= silenceMs) {
-        stopped = true
-        onSilence()
+        finish('silence')
         return
       }
     }

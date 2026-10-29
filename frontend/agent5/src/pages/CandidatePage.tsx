@@ -366,6 +366,7 @@ export function CandidatePage() {
   const capturingAnswerRef = useRef(false)
   const silenceMonitorRef = useRef<SilenceMonitor | null>(null)
   const submittingAnswerRef = useRef(false)
+  const skipUnansweredRef = useRef<(() => Promise<void>) | null>(null)
   const durationExtendedNotifiedRef = useRef(false)
   const hangingUpRef = useRef(false)
   const speakingNowRef = useRef<string | null>(null)
@@ -403,13 +404,18 @@ export function CandidatePage() {
         ? 'Candidate is taking the short MCQ test.'
         : 'Multiple-choice test in progress. Select one option to lock your answer.'
     }
+    // Do not flash oral Q1 while intro/MCQ is still loading (stage stays idle).
+    if (interviewStage !== 'oral') {
+      if (isHrParticipant && !aiInterviewStarted) {
+        return 'AI interview has not started yet. It will begin when the candidate joins.'
+      }
+      return 'Preparing your interview — introduction and short MCQ come first…'
+    }
     return (
       aiSession?.current_question?.question_text
       || (aiSession?.status === 'COMPLETED'
         ? 'Thank you. The AI interview is complete.'
-        : isHrParticipant && !aiInterviewStarted
-          ? 'AI interview has not started yet. It will begin when the candidate joins.'
-          : 'Preparing your first question…')
+        : 'Preparing your next question…')
     )
   }, [aiInterviewStarted, aiSession, interviewStage, isHrParticipant])
 
@@ -419,9 +425,12 @@ export function CandidatePage() {
       const current = Math.min(total, (mcq?.current_index || 0) + (mcq?.current_question ? 1 : 0))
       return `MCQ test · ${current} of ${total}`
     }
+    if (interviewStage !== 'oral') {
+      return isHrParticipant && !aiInterviewStarted ? 'Lobby' : 'Getting ready'
+    }
     if (isClosingSession(aiSession)) return 'Closing'
     if (isCandidateQnaSession(aiSession)) return 'Your questions'
-    return `${aiSession?.current_question?.category_name || (isHrParticipant && !aiInterviewStarted ? 'Lobby' : 'Interview question')}${aiSession ? ` · ${(aiSession.current_index || 0) + 1} of ${aiSession.total_questions || 0}` : ''}`
+    return `${aiSession?.current_question?.category_name || 'Interview question'}${aiSession ? ` · ${(aiSession.current_index || 0) + 1} of ${aiSession.total_questions || 0}` : ''}`
   }, [aiInterviewStarted, aiSession, interviewStage, isHrParticipant, mcq])
 
   const otherPartyPresent = isHrParticipant ? candidatePresent : hrPresent
@@ -504,7 +513,9 @@ export function CandidatePage() {
   const showMessage = useCallback((text: string, kind: MessageKind = 'notice') => {
     setMessage({ text, kind })
     if (messageTimerRef.current) window.clearTimeout(messageTimerRef.current)
-    messageTimerRef.current = window.setTimeout(() => setMessage({ text: '', kind: 'notice' }), 8000)
+    // Keep speak-again / your-turn banners up longer so new candidates notice them.
+    const holdMs = kind === 'error' || kind === 'warning' ? 12000 : 10000
+    messageTimerRef.current = window.setTimeout(() => setMessage({ text: '', kind: 'notice' }), holdMs)
   }, [])
 
   const api = useCallback(<T,>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -1757,9 +1768,9 @@ export function CandidatePage() {
         setIntroPlayed(true)
         return
       }
-      setInterviewStage('oral')
       const hasOralAnswers = (session.turn_history || []).some((turn) => Boolean(String(turn.answer_text || '').trim()))
       if (hrMode && alreadyLive) {
+        setInterviewStage('oral')
         setIntroPlayed(true)
         return
       }
@@ -1769,13 +1780,18 @@ export function CandidatePage() {
       }
       if (!introPlayed && session.status !== 'COMPLETED' && session.welcome_message) {
         await speakAiText(current, session.welcome_message)
+        setInterviewStage('oral')
         await speakAiQuestion(current, session)
         setIntroPlayed(true)
       } else if (!introPlayed && session.status !== 'COMPLETED') {
+        setInterviewStage('oral')
         void speakAiQuestion(current, session)
         setIntroPlayed(true)
       } else if (!hrMode) {
+        setInterviewStage('oral')
         void speakAiQuestion(current, session)
+      } else {
+        setInterviewStage('oral')
       }
     } catch (error) {
       showMessage(errorMessage(error), 'error')
@@ -2152,10 +2168,21 @@ export function CandidatePage() {
       answerRecorderRef.current = recorder
       setCapturingAnswer(true)
       setConversationState('listening')
-      silenceMonitorRef.current = startSilenceMonitor(stream, () => {
-        if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
-        void submitAnswerCaptureRef.current?.()
-      })
+      showMessage('Your turn — speak your answer now. We will wait about 8 seconds for you to start.', 'notice')
+      silenceMonitorRef.current = startSilenceMonitor(
+        stream,
+        () => {
+          if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
+          void submitAnswerCaptureRef.current?.()
+        },
+        {
+          noSpeechTimeoutMs: 8000,
+          onNoSpeech: () => {
+            if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
+            void skipUnansweredRef.current?.()
+          },
+        },
+      )
 
       // Live partial STT while speaking (same approach as HR interview lab).
       stopPartialStt()
@@ -2270,7 +2297,7 @@ export function CandidatePage() {
         return
       }
       if (next.current_question?.is_candidate_qna) {
-        showMessage('Interview questions are done. You can now share feedback or ask questions.', 'notice')
+        showMessage('Interview questions are done. You may ask one short question, or say you are done.', 'notice')
       }
       await speakAiQuestion(current, next)
     } catch (error) {
@@ -2285,6 +2312,50 @@ export function CandidatePage() {
     }
   }
   submitAnswerCaptureRef.current = submitAnswerCapture
+
+  const skipUnansweredQuestion = async () => {
+    const current = credentialsRef.current
+    const session = aiSessionRef.current || aiSession
+    if (!current || !session || leavingInterviewRef.current || hangingUpRef.current) return
+    if (submittingAnswerRef.current) return
+    submittingAnswerRef.current = true
+    stopSilenceMonitor()
+    const recorder = answerRecorderRef.current
+    if (recorder && recorder.state !== 'inactive') {
+      try { recorder.stop() } catch { /* ignore */ }
+    }
+    answerRecorderRef.current = null
+    stopMediaStream(answerRecordStreamRef.current)
+    answerRecordStreamRef.current = null
+    setCapturingAnswer(false)
+    setConversationState('processing')
+    setBusy('No answer heard — moving on')
+    showMessage('No answer heard in time. Moving to the next question.', 'warning')
+    try {
+      const next = await requestJson<AiInterviewSessionResponse>(
+        `/api/interview/room/sessions/${current.sessionId}/ai/answer`,
+        jsonRequest('POST', { answer_text: '[No response]' }),
+        current.token,
+        120_000,
+      )
+      setAiSession(next)
+      if (isClosingSession(next)) {
+        await speakClosingThenHangUp(current, next)
+        return
+      }
+      await speakAiQuestion(current, next)
+    } catch (error) {
+      setConversationState('idle')
+      showMessage(candidateSpeechError(error), 'error')
+      if (phaseRef.current === 'interview' && !leavingInterviewRef.current) {
+        await startAnswerCapture()
+      }
+    } finally {
+      submittingAnswerRef.current = false
+      setBusy('')
+    }
+  }
+  skipUnansweredRef.current = skipUnansweredQuestion
 
   const stopRecorders = useCallback(async () => {
     if (frameTimerRef.current) window.clearInterval(frameTimerRef.current)
@@ -3156,17 +3227,22 @@ export function CandidatePage() {
                     />
                   ) : (
                     <>
-                      <p className={`meet-status-line ${conversationState === 'ai_speaking' || aiSpeaking ? 'speaking' : conversationState === 'listening' || capturingAnswer ? 'listening' : conversationState === 'processing' ? 'speaking' : ''}`}>
+                      <p className={`meet-status-line meet-turn-banner ${conversationState === 'ai_speaking' || aiSpeaking ? 'speaking' : conversationState === 'listening' || capturingAnswer ? 'listening' : conversationState === 'processing' ? 'speaking' : ''}`}>
                         {conversationState === 'processing' || busy
                           ? 'Processing your answer…'
                           : aiSpeaking || conversationState === 'ai_speaking'
                             ? 'AI is speaking — please listen'
                             : capturingAnswer || conversationState === 'listening'
-                              ? 'Your turn — speak naturally, we detect when you finish'
+                              ? 'YOUR TURN — Speak your answer now'
                               : hrIntervention
                                 ? 'Paused for HR'
                                 : 'Waiting for the AI interviewer'}
                       </p>
+                      {(capturingAnswer || conversationState === 'listening') && (
+                        <p className="meet-turn-hint">
+                          Take a moment to think. We wait about 8 seconds for you to start speaking.
+                        </p>
+                      )}
                     </>
                   )}
                 </div>

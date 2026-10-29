@@ -643,16 +643,19 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   border-radius: 0;
 }
 .meet-interview-notice {
-  padding: 10px 20px;
-  font-size: 13px;
-  font-weight: 500;
+  padding: 16px 24px;
+  font-size: clamp(18px, 2.4vw, 26px);
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
   text-align: center;
   flex-shrink: 0;
+  z-index: 5;
 }
-.meet-interview-notice.warning { background: rgba(255,183,77,.15); color: #ffb74d; border-bottom: 1px solid rgba(255,183,77,.25); }
-.meet-interview-notice.error   { background: rgba(239,83,80,.15);  color: #ef5350; border-bottom: 1px solid rgba(239,83,80,.25); }
-.meet-interview-notice.success { background: rgba(102,187,106,.15); color: #66bb6a; border-bottom: 1px solid rgba(102,187,106,.25); }
-.meet-interview-notice.notice  { background: rgba(255,255,255,.07); color: #9aa0a6; border-bottom: 1px solid rgba(255,255,255,.08); }
+.meet-interview-notice.warning { background: rgba(255,183,77,.22); color: #ffcc80; border-bottom: 1px solid rgba(255,183,77,.35); }
+.meet-interview-notice.error   { background: rgba(239,83,80,.22);  color: #ff8a80; border-bottom: 1px solid rgba(239,83,80,.4); }
+.meet-interview-notice.success { background: rgba(102,187,106,.2); color: #81c784; border-bottom: 1px solid rgba(102,187,106,.35); }
+.meet-interview-notice.notice  { background: rgba(76, 175, 80, .18); color: #b9f6ca; border-bottom: 1px solid rgba(129, 199, 132, .35); }
 
 .meet-topbar {
   display: flex;
@@ -943,12 +946,35 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
   font-weight: 550;
 }
 .meet-status-line {
-  font-size: 13px;
-  font-weight: 650;
+  font-size: clamp(18px, 2.2vw, 28px);
+  font-weight: 800;
+  line-height: 1.3;
   color: #9aa0a6;
+  margin: 0;
+  text-align: center;
 }
 .meet-status-line.speaking { color: #fbbf24; }
-.meet-status-line.listening { color: #4ade80; }
+.meet-status-line.listening {
+  color: #69f0ae;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(76, 175, 80, 0.16);
+  border: 1px solid rgba(105, 240, 174, 0.35);
+  animation: meet-turn-pulse 1.6s ease-in-out infinite;
+}
+.meet-turn-banner { width: 100%; }
+.meet-turn-hint {
+  margin: 10px 0 0;
+  font-size: clamp(14px, 1.6vw, 18px);
+  font-weight: 600;
+  color: #c8e6c9;
+  text-align: center;
+  line-height: 1.35;
+}
+@keyframes meet-turn-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(105, 240, 174, 0.25); }
+  50% { box-shadow: 0 0 0 8px rgba(105, 240, 174, 0); }
+}
 .meet-transcript {
   min-height: 72px;
   max-height: 140px;

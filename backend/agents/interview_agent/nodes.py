@@ -271,6 +271,11 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             }
 
         ctx = state.get("EvaluationContext") or {}
+        prior_qna = [
+            str(turn.get("answer_text") or "").strip()
+            for turn in history
+            if isinstance(turn, dict) and turn.get("candidate_qna") and str(turn.get("answer_text") or "").strip()
+        ]
         result = generate_candidate_qna_reply(
             answer,
             job_position=str(ctx.get("job_position") or ""),
@@ -279,6 +284,7 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             department_brief=str(ctx.get("department_brief") or ""),
             department_name=str(ctx.get("department_name") or ""),
             company_intro=str(ctx.get("company_intro") or ""),
+            prior_answers=prior_qna,
         )
         history.append(
             {

@@ -10,16 +10,22 @@ from agents.shared.llama_client import call_llama_json, llama_available
 
 logger = logging.getLogger(__name__)
 
-MAX_QNA_TURNS = 5
+# Keep the wrap-up short — each turn can cost an LLM call.
+MAX_QNA_TURNS = 2
 
 QNA_OPENING = (
-    "Those were my interview questions. You now have time to share any feedback "
-    "or ask about the role or next steps. If you have no questions, just say you are done."
+    "Those were my interview questions. You may ask one brief question about the role "
+    "or next steps, or say you are done."
 )
 
 CLOSING_THANK_YOU = (
-    "Thank you for your time today. We appreciate your questions and feedback. "
-    "Our team will follow up with next steps. Wishing you all the best."
+    "Thank you for your time today. Our team will follow up with next steps. "
+    "Wishing you all the best."
+)
+
+_WRAP_UP_REPLY = (
+    "Thanks for your questions. That wraps up our time today. "
+    "HR will share next steps. Take care."
 )
 
 _DECLINE_REPLY = (
@@ -72,44 +78,41 @@ _UNKNOWN_INTERNAL_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_QNA_SYSTEM = """You are an AI interviewer wrapping up a job interview.
-The candidate may share feedback or ask questions.
+_QNA_SYSTEM = """You are an AI interviewer wrapping up a job interview briefly.
+Keep replies to 1–2 short spoken sentences. Do not chat or invite more questions.
 
 Return JSON only:
 {
   "closing": boolean,
   "allowed": boolean,
-  "reply": "2 to 4 spoken sentences, professional and warm"
+  "reply": "1 to 2 spoken sentences"
 }
 
-Set closing=true when the candidate is finished, has no questions, or only says thank you.
+Set closing=true when the candidate is finished, says thank you, repeats a prior question,
+asks something off-topic, or this is the last allowed turn.
 
-REFERENCE TEXTS below are the source of truth for company, department, and role answers.
-When the candidate asks about the company, department, role, or responsibilities,
-answer using those texts. Paraphrase naturally; do not invent facts beyond them.
+REFERENCE TEXTS are the only source of truth. Paraphrase; do not invent facts.
 
 Still unknown (do not guess): salaries, CTC, named managers, exact headcount,
-reporting lines, office seating, shifts, or unannounced plans — say HR can follow up.
+reporting lines, office seating, shifts — say HR can follow up, then close.
 
-Safe topics: role responsibilities (from reference), department overview (from reference),
-company intro (from reference), the interview process, and that HR shares next steps.
+Safe topics only: role (from reference), department (from reference), company intro
+(from reference), and that HR shares next steps.
 
-DECLINE (allowed=false): politics, religion, caste, race, gender attacks, adult content,
-illegal activity, hacking, confidential internals, medical/legal advice, or cheating.
-
-If declining, politely refuse and offer to talk about the role or next steps instead.
+DECLINE (allowed=false): politics, religion, caste, race, adult content, illegal topics,
+hacking, confidential internals, or cheating. Decline briefly and close.
 """
 
 
 def build_qna_opening(*, role_summary: str = "") -> str:
-    """End-of-questions opener; includes role overview when available."""
+    """End-of-questions opener; includes a short role overview when available."""
     summary = (role_summary or "").strip()
     if summary:
+        # Keep spoken opening short — long overviews burn TTS and invite long Q&A.
+        brief = summary if len(summary) <= 280 else f"{summary[:277].rstrip()}..."
         return (
-            f"Those were my interview questions. As promised, here is a brief overview of the role: "
-            f"{summary} "
-            "You now have time to share feedback or ask about the role, the department, "
-            "the company, or next steps. If you have no questions, just say you are done."
+            f"Those were my interview questions. Briefly about the role: {brief} "
+            "You may ask one short question about the role or next steps, or say you are done."
         )
     return QNA_OPENING
 
@@ -129,6 +132,31 @@ def looks_controversial(text: str) -> bool:
 
 def looks_unknown_internal(text: str) -> bool:
     return bool(_UNKNOWN_INTERNAL_PATTERNS.search(text or ""))
+
+
+def _norm_qna(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def looks_repeated_qna(text: str, prior_answers: list[str] | None = None) -> bool:
+    """True when the candidate asks essentially the same thing again."""
+    current = _norm_qna(text)
+    if len(current) < 8:
+        return False
+    for prior in prior_answers or []:
+        prev = _norm_qna(prior)
+        if len(prev) < 8:
+            continue
+        if current == prev or current in prev or prev in current:
+            return True
+        cur_tokens = set(current.split())
+        prev_tokens = set(prev.split())
+        if not cur_tokens or not prev_tokens:
+            continue
+        overlap = len(cur_tokens & prev_tokens) / max(len(cur_tokens), len(prev_tokens))
+        if overlap >= 0.72:
+            return True
+    return False
 
 
 def qna_prompt_question(text: str, *, turn: int = 0, closing: bool = False) -> dict[str, Any]:
@@ -189,17 +217,26 @@ def generate_candidate_qna_reply(
     department_brief: str = "",
     department_name: str = "",
     company_intro: str = "",
+    prior_answers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Classify the candidate utterance and return a spoken reply."""
+    """Classify the candidate utterance and return a short spoken reply."""
     text = (candidate_text or "").strip()
+    # Last allowed turn, farewell, or a repeat → close without more chat.
     if is_closing_utterance(text) or turn >= MAX_QNA_TURNS:
         return {"closing": True, "allowed": True, "reply": CLOSING_THANK_YOU}
+    if looks_repeated_qna(text, prior_answers):
+        return {"closing": True, "allowed": True, "reply": _WRAP_UP_REPLY}
 
     if looks_controversial(text):
-        return {"closing": False, "allowed": False, "reply": _DECLINE_REPLY}
+        return {"closing": True, "allowed": False, "reply": f"{_DECLINE_REPLY} {_WRAP_UP_REPLY}"}
 
-    if _HARD_UNKNOWN.search(text):
-        return {"closing": False, "allowed": True, "reply": _UNKNOWN_REPLY}
+    if _HARD_UNKNOWN.search(text) or looks_unknown_internal(text):
+        # One short unknown reply, then end — avoid multi-turn salary/next-step loops.
+        return {
+            "closing": True,
+            "allowed": True,
+            "reply": f"{_UNKNOWN_REPLY} {_WRAP_UP_REPLY}",
+        }
 
     refs = _reference_block(
         role_summary=role_summary,
@@ -208,37 +245,7 @@ def generate_candidate_qna_reply(
         company_intro=company_intro,
     )
 
-    if llama_available():
-        try:
-            data = call_llama_json(
-                _QNA_SYSTEM,
-                (
-                    f"Job position: {job_position or 'the open role'}\n"
-                    f"Q&A turn: {turn} of {MAX_QNA_TURNS}\n"
-                    f"REFERENCE TEXTS:\n{refs}\n\n"
-                    f"Candidate said: {text}"
-                ),
-                temperature=0.3,
-                max_tokens=400,
-            )
-            closing = bool(data.get("closing"))
-            allowed = bool(data.get("allowed", True))
-            reply = str(data.get("reply") or "").strip()
-            if not allowed:
-                reply = reply or _DECLINE_REPLY
-            if closing:
-                reply = reply or CLOSING_THANK_YOU
-            if not reply:
-                reply = (
-                    "Thank you. If you have another question about the role or next steps, "
-                    "please go ahead. Otherwise, say you are done."
-                )
-            if _HARD_UNKNOWN.search(text):
-                reply = _UNKNOWN_REPLY
-            return {"closing": closing, "allowed": allowed, "reply": reply}
-        except Exception:
-            logger.exception("Candidate Q&A LLM reply failed; using fallback.")
-
+    # Prefer free template answers from JD/dept/company briefs before calling the LLM.
     brief_reply = _fallback_from_briefs(
         text,
         role_summary=role_summary,
@@ -246,13 +253,43 @@ def generate_candidate_qna_reply(
         company_intro=company_intro,
     )
     if brief_reply:
-        return {"closing": False, "allowed": True, "reply": brief_reply}
+        closing = turn >= MAX_QNA_TURNS - 1
+        reply = brief_reply if not closing else f"{brief_reply} {_WRAP_UP_REPLY}"
+        return {"closing": closing, "allowed": True, "reply": reply}
+
+    if llama_available():
+        try:
+            data = call_llama_json(
+                _QNA_SYSTEM,
+                (
+                    f"Job position: {job_position or 'the open role'}\n"
+                    f"Q&A turn: {turn} of {MAX_QNA_TURNS} — close after this if possible\n"
+                    f"REFERENCE TEXTS:\n{refs}\n\n"
+                    f"Candidate said: {text}"
+                ),
+                temperature=0.2,
+                max_tokens=180,
+            )
+            closing = bool(data.get("closing")) or turn >= MAX_QNA_TURNS - 1
+            allowed = bool(data.get("allowed", True))
+            reply = str(data.get("reply") or "").strip()
+            if not allowed:
+                reply = reply or _DECLINE_REPLY
+                closing = True
+            if closing:
+                reply = reply or CLOSING_THANK_YOU
+            if not reply:
+                reply = _WRAP_UP_REPLY
+                closing = True
+            if _HARD_UNKNOWN.search(text):
+                reply = f"{_UNKNOWN_REPLY} {_WRAP_UP_REPLY}"
+                closing = True
+            return {"closing": closing, "allowed": allowed, "reply": reply}
+        except Exception:
+            logger.exception("Candidate Q&A LLM reply failed; using fallback.")
 
     return {
-        "closing": False,
+        "closing": True,
         "allowed": True,
-        "reply": (
-            "Thank you for sharing that. I can talk about the role or what happens "
-            "after this interview. What would you like to know?"
-        ),
+        "reply": _WRAP_UP_REPLY,
     }
