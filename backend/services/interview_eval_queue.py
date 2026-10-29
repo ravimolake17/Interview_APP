@@ -37,6 +37,15 @@ async def _persist_and_maybe_followup(job: dict[str, Any], eval_dict: dict[str, 
     question = dict(job.get("question") or {})
     answer = str(job.get("answer_text") or "")
     is_followup = bool(question.get("is_followup") or job.get("is_followup"))
+    # End-of-interview feedback / role Q&A must never be scored or persisted.
+    if (
+        question.get("is_candidate_qna")
+        or question.get("is_closing")
+        or str(question.get("category_id") or "").strip().lower() == "candidate_qna"
+        or str(question.get("id") or "").lower().startswith("qna-")
+        or job.get("candidate_qna")
+    ):
+        return
     prior = asked_followup_keys(list(job.get("turn_history") or []))
     level = str((job.get("context") or {}).get("candidate_level") or "") or None
 
@@ -85,7 +94,16 @@ async def _persist_and_maybe_followup(job: dict[str, Any], eval_dict: dict[str, 
     followups = await loop.run_in_executor(None, _build)
     if not followups:
         return
+    from agents.interview_agent.followup_generator import followup_invents_team_context
+
     fu = followups[0].model_dump(mode="json")
+    fu["source_answer"] = answer
+    if followup_invents_team_context(str(fu.get("question_text") or ""), answer):
+        logger.info(
+            "Dropped invented team follow-up for %s (answer had no team language)",
+            candidate_id,
+        )
+        return
     if push_pending_followup(candidate_id, fu):
         logger.info(
             "Queued deferred follow-up for %s (parent=%s)",

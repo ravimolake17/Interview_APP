@@ -70,6 +70,7 @@ def _mcq_items(candidate: Candidate) -> list[dict[str, Any]]:
                 "status": status,
                 "model": "mcq_key",
                 "feedback": "Correct." if score >= 100 else "Incorrect, skipped, or not answered. Counted as 0 against the full MCQ set.",
+                "counts_toward_score": True,
             }
         )
     return items
@@ -88,6 +89,26 @@ def _row_get(row: Any, key: str, default: Any = None) -> Any:
     return getattr(row, key, default)
 
 
+def _is_candidate_qna_payload(payload: Any) -> bool:
+    """True for end-of-interview feedback / role Q&A turns that must not affect scores."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("is_candidate_qna") or payload.get("candidate_qna") or payload.get("is_closing"):
+        return True
+    if str(payload.get("category_id") or "").strip().lower() == "candidate_qna":
+        return True
+    qid = str(payload.get("question_id") or payload.get("id") or "").strip().lower()
+    if qid.startswith("qna-"):
+        return True
+    nested = payload.get("question") if isinstance(payload.get("question"), dict) else None
+    if nested and _is_candidate_qna_payload(nested):
+        return True
+    evaluation = payload.get("evaluation") if isinstance(payload.get("evaluation"), dict) else {}
+    if evaluation.get("is_candidate_qna") or evaluation.get("candidate_qna"):
+        return True
+    return False
+
+
 def _as_turn_dict(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return dict(row)
@@ -102,6 +123,7 @@ def _as_turn_dict(row: Any) -> dict[str, Any]:
         "evaluation": payload,
         "audio_path": payload.get("audio_path"),
         "is_followup": payload.get("is_followup"),
+        "is_candidate_qna": payload.get("is_candidate_qna") or payload.get("candidate_qna"),
     }
 
 
@@ -162,7 +184,13 @@ def _eval_maps(evaluations: Iterable[Any]) -> tuple[dict[str, Any], dict[str, An
     return by_id, by_text, unique
 
 
-def _oral_item_from_eval(row: Any, *, kind: str = "oral", status: str = "answered") -> dict[str, Any]:
+def _oral_item_from_eval(
+    row: Any,
+    *,
+    kind: str = "oral",
+    status: str = "answered",
+    counts_toward_score: bool = True,
+) -> dict[str, Any]:
     payload = _as_dict(_row_get(row, "evaluation_json") if not isinstance(row, dict) else row.get("evaluation"))
     if isinstance(row, dict) and not payload:
         payload = row
@@ -175,6 +203,24 @@ def _oral_item_from_eval(row: Any, *, kind: str = "oral", status: str = "answere
     audio_path = str(_row_get(row, "audio_path") or payload.get("audio_path") or "").strip()
     question_id = str(_row_get(row, "question_id") or "").strip()
     answered = status == "answered" and bool(answer) and answer.lower() not in {"not answered", "[skipped by hr]"}
+    if not counts_toward_score:
+        return {
+            "kind": kind,
+            "question_id": question_id,
+            "question_text": str(_row_get(row, "question_text") or "").strip(),
+            "answer_text": answer or "Not answered",
+            "correct_answer": "",
+            "score": None,
+            "max_score": None,
+            "verdict": "not_scored",
+            "status": "answered" if answered else status,
+            "model": str(_row_get(row, "model") or payload.get("model") or ""),
+            "feedback": "Candidate feedback / role Q&A — not scored and not included in the interview average.",
+            "gaps": [],
+            "strengths": [],
+            "has_audio": bool(audio_path),
+            "counts_toward_score": False,
+        }
     if answered and is_non_answer(answer):
         score = 0.0
         verdict = "insufficient"
@@ -204,6 +250,7 @@ def _oral_item_from_eval(row: Any, *, kind: str = "oral", status: str = "answere
         "gaps": gaps,
         "strengths": strengths,
         "has_audio": bool(audio_path),
+        "counts_toward_score": True,
     }
 
 
@@ -223,6 +270,7 @@ def _unanswered_oral(question: dict[str, Any]) -> dict[str, Any]:
         "gaps": [],
         "strengths": [],
         "has_audio": False,
+        "counts_toward_score": True,
     }
 
 
@@ -232,6 +280,22 @@ def _history_rows(turn_history: Iterable[Any] | None) -> list[dict[str, Any]]:
         if not isinstance(turn, dict):
             continue
         question = turn.get("question") if isinstance(turn.get("question"), dict) else {}
+        if _is_candidate_qna_payload(turn) or _is_candidate_qna_payload(question):
+            rows.append(
+                {
+                    "question_id": str(question.get("id") or turn.get("question_id") or ""),
+                    "question_text": str(question.get("question_text") or turn.get("question_text") or ""),
+                    "answer_text": str(turn.get("answer_text") or "").strip(),
+                    "score": None,
+                    "verdict": "not_scored",
+                    "evaluation": {},
+                    "model": "",
+                    "is_followup": False,
+                    "is_candidate_qna": True,
+                    "audio_path": turn.get("audio_path"),
+                }
+            )
+            continue
         evaluation = turn.get("evaluation") if isinstance(turn.get("evaluation"), dict) else {}
         answer = str(turn.get("answer_text") or "").strip()
         rows.append(
@@ -244,6 +308,7 @@ def _history_rows(turn_history: Iterable[Any] | None) -> list[dict[str, Any]]:
                 "evaluation": evaluation,
                 "model": evaluation.get("model"),
                 "is_followup": bool(question.get("is_followup")),
+                "is_candidate_qna": False,
                 "audio_path": turn.get("audio_path") or evaluation.get("audio_path"),
             }
         )
@@ -256,13 +321,23 @@ def _oral_items(
     evaluations: Iterable[Any],
     extra_turns: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    combined = list(evaluations or []) + list(extra_turns or [])
+    filtered_evals: list[Any] = []
+    for row in evaluations or []:
+        payload = _as_dict(_row_get(row, "evaluation_json") if not isinstance(row, dict) else row.get("evaluation"))
+        qid = str(_row_get(row, "question_id") or "").strip()
+        if _is_candidate_qna_payload({"question_id": qid, **payload}) or str(qid).lower().startswith("qna-"):
+            continue
+        filtered_evals.append(row)
+
+    combined = list(filtered_evals) + list(extra_turns or [])
     by_id, by_text, rows = _eval_maps(combined)
     used: set[int] = set()
     items: list[dict[str, Any]] = []
 
     for question in planned_questions or []:
         if not isinstance(question, dict):
+            continue
+        if _is_candidate_qna_payload(question):
             continue
         qid = str(question.get("id") or "").strip()
         text = _norm_text(question.get("question_text") or "")
@@ -276,6 +351,11 @@ def _oral_items(
 
     for row in rows:
         if id(row) in used:
+            continue
+        if _is_candidate_qna_payload(row if isinstance(row, dict) else _as_turn_dict(row)):
+            items.append(
+                _oral_item_from_eval(row, kind="candidate_qna", status="answered", counts_toward_score=False)
+            )
             continue
         kind = "followup" if bool(_row_get(row, "is_followup")) or "follow" in _norm_text(_row_get(row, "question_text")) else "oral"
         items.append(_oral_item_from_eval(row, kind=kind, status="answered"))
@@ -297,15 +377,17 @@ def build_interview_answer_report(
         extra_turns=extra_turns,
     )
     items = [*mcq_items, *oral_items]
-    answered = [row for row in items if row.get("status") == "answered"]
-    unanswered = [row for row in items if row.get("status") in {"unanswered", "skipped"}]
-    total = len(items)
-    earned = sum(float(row.get("score") or 0) for row in items)
+    scored_items = [row for row in items if row.get("counts_toward_score", True)]
+    answered = [row for row in scored_items if row.get("status") == "answered"]
+    unanswered = [row for row in scored_items if row.get("status") in {"unanswered", "skipped"}]
+    total = len(scored_items)
+    earned = sum(float(row.get("score") or 0) for row in scored_items)
     interview_score = round(earned / total, 1) if total else 0.0
 
     runtime = runtime_from_snapshot(candidate)
     runtime_state = str(runtime.get("state") or "")
     left_early = runtime_state == "ENDED" or str(runtime.get("left_by") or "") == "candidate"
+    scored_oral = [row for row in oral_items if row.get("counts_toward_score", True)]
     interview_attempted = bool(
         answered
         or runtime_state in AI_STARTED_STATES
@@ -328,11 +410,12 @@ def build_interview_answer_report(
         "questions_unanswered": len(unanswered),
         "mcq_total": len(mcq_items),
         "mcq_correct": mcq_correct,
-        "oral_total": len(oral_items),
-        "oral_answered": sum(1 for row in oral_items if row.get("status") == "answered"),
+        "oral_total": len(scored_oral),
+        "oral_answered": sum(1 for row in scored_oral if row.get("status") == "answered"),
         "runtime_state": runtime_state,
         "scoring_note": (
             "Interview score is the average of every planned MCQ and oral question. "
-            "Unanswered, skipped, or unasked questions count as 0 — not as if they were never on the paper."
+            "Unanswered, skipped, or unasked questions count as 0 — not as if they were never on the paper. "
+            "Candidate feedback and role Q&A turns are shown but never scored."
         ),
     }

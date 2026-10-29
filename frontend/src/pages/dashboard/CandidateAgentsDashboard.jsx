@@ -177,6 +177,7 @@ function toProctorMonitorUrl(agent5, sessionId) {
 function answerKindLabel(kind) {
   if (kind === 'mcq') return 'MCQ';
   if (kind === 'followup') return 'Oral follow-up';
+  if (kind === 'candidate_qna') return 'Feedback / Q&A';
   return 'Oral';
 }
 
@@ -381,15 +382,29 @@ export default function CandidateAgentsDashboard() {
       setLoading(true);
       setError('');
     }
+    let mapped = null;
     try {
       const { data } = await getHRCandidateDetail(candidateId);
-      const mapped = mapCandidateFromBackend(data, data);
+      mapped = mapCandidateFromBackend(data, data);
       setCandidate(mapped);
-      // Agent 3/4 only after the candidate books a slot — do not auto-spend LLM earlier.
-      const interviewBooked = Boolean(
-        mapped.scheduledDate || mapped.meetingLink || mapped.interviewScheduled,
-      );
+    } catch (err) {
+      if (!silent) {
+        setError(err.response?.data?.detail || 'Failed to load candidate agents dashboard.');
+        setCandidate(null);
+        setBlueprint(null);
+      }
+      if (!silent) setLoading(false);
+      return;
+    }
 
+    // Show the shell as soon as candidate/screening data is ready; agents fill in as they land.
+    if (!silent) setLoading(false);
+
+    const interviewBooked = Boolean(
+      mapped.scheduledDate || mapped.meetingLink || mapped.interviewScheduled,
+    );
+
+    const loadBlueprint = async () => {
       setBlueprintLoading(true);
       try {
         const [blueprintRes, availabilityRes] = await Promise.allSettled([
@@ -431,13 +446,15 @@ export default function CandidateAgentsDashboard() {
               autoPlanRef.current = false;
             }
           }
-        } else {
-          throw blueprintRes.reason;
         }
+      } catch {
+        setBlueprint(null);
       } finally {
         setBlueprintLoading(false);
       }
+    };
 
+    const loadAgent4 = async () => {
       setAgent4Loading(true);
       try {
         const statusRes = await getInterviewAgentStatus(candidateId);
@@ -473,7 +490,9 @@ export default function CandidateAgentsDashboard() {
       } finally {
         setAgent4Loading(false);
       }
+    };
 
+    const loadAgent6 = async () => {
       setAgent6Loading(true);
       try {
         const [statusRes, evalRes] = await Promise.all([
@@ -483,7 +502,10 @@ export default function CandidateAgentsDashboard() {
         setAgent6(statusRes.data);
         setEvaluations(evalRes.data?.evaluations || []);
         if (evalRes.data?.report || statusRes.data?.report) {
-          setAgent6((prev) => ({ ...(prev || statusRes.data || {}), report: evalRes.data?.report || statusRes.data?.report }));
+          setAgent6((prev) => ({
+            ...(prev || statusRes.data || {}),
+            report: evalRes.data?.report || statusRes.data?.report,
+          }));
         }
       } catch {
         setAgent6(null);
@@ -491,7 +513,9 @@ export default function CandidateAgentsDashboard() {
       } finally {
         setAgent6Loading(false);
       }
+    };
 
+    const loadAgent7 = async () => {
       setAgent7Loading(true);
       try {
         const recRes = await getRecommendationAgentStatus(candidateId);
@@ -501,7 +525,9 @@ export default function CandidateAgentsDashboard() {
       } finally {
         setAgent7Loading(false);
       }
+    };
 
+    const loadAgent5 = async () => {
       setAgent5Loading(true);
       try {
         const fraudRes = await getFraudAgentStatus(candidateId);
@@ -511,26 +537,42 @@ export default function CandidateAgentsDashboard() {
       } finally {
         setAgent5Loading(false);
       }
+    };
+
+    const loadRoomRuntime = async () => {
       try {
         const runtimeRes = await getInterviewRoomRuntime(candidateId);
         setRoomRuntime(runtimeRes.data);
       } catch {
         setRoomRuntime(null);
       }
-    } catch (err) {
-      if (!silent) {
-        setError(err.response?.data?.detail || 'Failed to load candidate agents dashboard.');
-        setCandidate(null);
-        setBlueprint(null);
-      }
-    } finally {
-      if (!silent) setLoading(false);
-    }
+    };
+
+    await Promise.allSettled([
+      loadBlueprint(),
+      loadAgent4(),
+      loadAgent6(),
+      loadAgent7(),
+      loadAgent5(),
+      loadRoomRuntime(),
+    ]);
   }, [candidateId, syncPlanEditors]);
 
   useEffect(() => {
     autoQuestionsRef.current = false;
     autoPlanRef.current = false;
+    setBlueprint(null);
+    setAgent4(null);
+    setAgent6(null);
+    setAgent7(null);
+    setAgent5(null);
+    setEvaluations([]);
+    setRoomRuntime(null);
+    setBlueprintLoading(true);
+    setAgent4Loading(true);
+    setAgent6Loading(true);
+    setAgent7Loading(true);
+    setAgent5Loading(true);
     loadAll();
   }, [loadAll]);
 
@@ -2349,8 +2391,9 @@ export default function CandidateAgentsDashboard() {
                             {answerKindLabel(row.kind)} · {answerStatusLabel(row.status)}
                           </span>
                           <span className="text-[11px] font-semibold text-col">
-                            {Number(row.score || 0).toFixed(0)} / {Number(row.max_score || 100).toFixed(0)}
-                            {row.verdict ? ` · ${row.verdict}` : ''}
+                            {row.counts_toward_score === false || row.kind === 'candidate_qna'
+                              ? 'Not scored'
+                              : `${Number(row.score || 0).toFixed(0)} / ${Number(row.max_score || 100).toFixed(0)}${row.verdict ? ` · ${row.verdict}` : ''}`}
                           </span>
                         </div>
                         <p className="text-sm text-col font-medium whitespace-pre-wrap">{row.question_text || '—'}</p>

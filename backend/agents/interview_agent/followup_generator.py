@@ -19,14 +19,15 @@ _THIN_ANSWER = re.compile(
     re.IGNORECASE,
 )
 
-_OWNERSHIP_PROBE = (
-    "You mentioned working with others — what was specifically your contribution versus the team's?"
+# Banned invented-context probes (LLM/templates must not claim the candidate said this).
+_FAKE_TEAM_CLAIM = re.compile(
+    r"(you mentioned working with others|contribution versus the team|"
+    r"versus the team's|vs\.?\s*the team)",
+    re.IGNORECASE,
 )
-_OWNERSHIP_REASON = "Clarify individual ownership."
 
-_PERSONAL_OWNERSHIP = re.compile(
-    r"\b(i\s+(built|wrote|owned|led|designed|implemented|developed|created|handled|"
-    r"was responsible|took ownership|my (role|part|contribution|responsibility)))\b",
+_TEAM_LANGUAGE = re.compile(
+    r"\b(we\s+|our team|the team|teammates?|colleagues|pair[- ]programm)\b",
     re.IGNORECASE,
 )
 
@@ -151,13 +152,20 @@ def asked_followup_keys(turn_history: list[dict[str, Any]] | None) -> set[str]:
     return keys
 
 
-def _mentions_team_without_ownership(answer: str) -> bool:
-    lower = answer.lower()
-    if not any(w in lower for w in ("we ", " our team", "the team", "teammate", "colleagues")):
+def answer_mentions_team(answer: str) -> bool:
+    return bool(_TEAM_LANGUAGE.search(answer or ""))
+
+
+def followup_invents_team_context(question_text: str, candidate_answer: str) -> bool:
+    """True when the probe claims team/collab that the answer never said."""
+    text = question_text or ""
+    if not _FAKE_TEAM_CLAIM.search(text):
+        # Also block softer variants that assume collaboration.
+        lower = text.casefold()
+        if "working with others" in lower or "versus the team" in lower:
+            return not answer_mentions_team(candidate_answer)
         return False
-    if _PERSONAL_OWNERSHIP.search(answer):
-        return False
-    return True
+    return not answer_mentions_team(candidate_answer)
 
 
 def generate_followups(
@@ -182,16 +190,8 @@ def generate_followups(
 
     probes: list[tuple[str, str, str]] = []
 
-    # Hardcoded ownership probe — only once per interview, and only when team
-    # language appears without a clear personal contribution.
-    ownership_key = _OWNERSHIP_PROBE.casefold()
-    ownership_reason_key = f"reason:{_OWNERSHIP_REASON.casefold()}"
-    if (
-        ownership_key not in used
-        and ownership_reason_key not in used
-        and _mentions_team_without_ownership(answer)
-    ):
-        probes.append((_OWNERSHIP_PROBE, _OWNERSHIP_REASON, "medium"))
+    # No hardcoded "you mentioned working with others" probe — that was inventing
+    # context the candidate never said (and STT "we" false-positives made it worse).
 
     if any(w in lower for w in ("challenge", "issue", "problem", "bug", "fail")):
         probes.append(
@@ -243,6 +243,8 @@ def generate_followups(
         reason_key = f"reason:{reason.casefold()}"
         if key in seen or reason_key in seen:
             continue
+        if followup_invents_team_context(text, answer):
+            continue
         seen.add(key)
         seen.add(reason_key)
         followups.append(
@@ -260,6 +262,7 @@ def generate_followups(
     return [
         item.model_copy(update={"question_text": shorten_question(item.question_text, 16)})
         for item in followups
+        if not followup_invents_team_context(item.question_text, answer)
     ]
 
 

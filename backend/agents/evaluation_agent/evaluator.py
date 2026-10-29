@@ -318,6 +318,8 @@ def evaluate_answer_with_llama(
         "Only score above 0 if the candidate actually attempted the question. "
         "followup_hints must be NEW spoken probes grounded in THIS answer's gaps — "
         "never generic rephrases of the original question. "
+        "Never invent that the candidate 'worked with others' or suggest "
+        "'contribution versus the team' unless their answer clearly said so. "
         "Return JSON with keys: score (0-100), verdict "
         "(strong|adequate|weak|insufficient|off_topic), strengths (array), "
         "gaps (array), resume_alignment (string), jd_alignment (string), "

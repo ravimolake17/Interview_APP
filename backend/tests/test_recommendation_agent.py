@@ -217,3 +217,49 @@ def test_dont_know_oral_answer_is_scored_zero():
     assert report["items"][0]["status"] == "answered"
     assert report["items"][0]["score"] == 0.0
     assert report["items"][0]["verdict"] == "insufficient"
+
+
+def test_candidate_qna_turns_are_not_scored():
+    candidate = SimpleNamespace(evaluation_snapshot={})
+    planned = [{"id": "q1", "question_text": "Explain Python GIL"}]
+    history = [
+        {
+            "question": {"id": "q1", "question_text": "Explain Python GIL"},
+            "answer_text": "Global interpreter lock.",
+            "evaluation": {"score": 80, "verdict": "strong"},
+        },
+        {
+            "question": {
+                "id": "qna-open-0",
+                "question_text": "Those were my interview questions. As promised, here is a brief overview of the role.",
+                "is_candidate_qna": True,
+                "category_id": "candidate_qna",
+            },
+            "answer_text": "What is the expected salary for this role?",
+            "evaluation": None,
+            "candidate_qna": True,
+        },
+        {
+            "question": {
+                "id": "qna-reply-1",
+                "question_text": "I don't have that information to share in this interview.",
+                "is_candidate_qna": True,
+            },
+            "answer_text": "What is the next step?",
+            "candidate_qna": True,
+        },
+    ]
+    report = build_interview_answer_report(
+        candidate=candidate,
+        evaluations=[],
+        planned_oral_questions=planned,
+        turn_history=history,
+    )
+    scored = [row for row in report["items"] if row.get("counts_toward_score", True)]
+    qna = [row for row in report["items"] if row.get("kind") == "candidate_qna"]
+    assert report["questions_total"] == 1
+    assert report["interview_score"] == 80.0
+    assert len(scored) == 1
+    assert len(qna) == 2
+    assert all(row.get("score") is None for row in qna)
+    assert all(row.get("verdict") == "not_scored" for row in qna)

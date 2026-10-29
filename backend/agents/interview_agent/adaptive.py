@@ -12,7 +12,10 @@ from agents.blueprint_agent.schemas import (
     InterviewBlueprintResponse,
     QuestionPlanSlot,
 )
-from agents.interview_agent.followup_generator import generate_followups
+from agents.interview_agent.followup_generator import (
+    followup_invents_team_context,
+    generate_followups,
+)
 from agents.interview_agent.question_generator import (
     generate_questions_from_blueprint,
     is_spoken_interview_question,
@@ -573,11 +576,12 @@ def generate_adaptive_followups(
     system = (
         "You are Agent 4 on a live voice interview. "
         "Agent 6 already scored the answer. Your job is ONLY to invent NEW follow-up "
-        "questions from that evaluation — grounded in the candidate's words and gaps. "
+        "questions from that evaluation — grounded in the candidate's EXACT words and gaps. "
         "If the candidate did not really answer, return {\"follow_ups\": []}. "
+        "CRITICAL: Never invent context. Do NOT say 'you mentioned working with others' "
+        "or ask about 'contribution versus the team' unless the candidate's answer "
+        "clearly used team/we/colleagues language. "
         "Do NOT rephrase the original question. "
-        "Do NOT ask a generic 'contribution versus the team' probe unless Agent 6 "
-        "explicitly flagged missing ownership AND that topic was not already asked. "
         "Never repeat anything in Already asked. "
         "Write up to N short spoken probes (max 22 words each). "
         "Return JSON: {\"follow_ups\": [{\"question_text\":\"...\",\"reason\":\"...\","
@@ -610,11 +614,19 @@ def generate_adaptive_followups(
             text = shorten_question(str(item.get("question_text") or "").strip(), FOLLOWUP_MAX_WORDS)
             if len(text) < 12 or looks_like_resume_summary(text.rstrip("?")):
                 continue
+            if followup_invents_team_context(text, candidate_answer):
+                continue
             key = text.casefold()
             if key in used or any(prev in key or key in prev for prev in used if len(prev) > 20):
                 continue
-            if "contribution versus" in key or "versus the team" in key:
-                if any("ownership" in u or "versus the team" in u for u in used):
+            if "contribution versus" in key or "versus the team" in key or "working with others" in key:
+                # Already asked any ownership/team probe this interview — never again.
+                if any(
+                    "ownership" in u
+                    or "versus the team" in u
+                    or "working with others" in u
+                    for u in used
+                ):
                     continue
             difficulty = str(item.get("difficulty") or "medium").lower()
             if difficulty not in {"easy", "medium", "hard"}:
