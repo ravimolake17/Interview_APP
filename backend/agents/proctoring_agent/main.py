@@ -464,6 +464,16 @@ def proctoring_page():
     return _react_index()
 
 
+@app.get("/proctoring/{filename}")
+def proctoring_root_file(filename: str):
+    """Top-level build files from Vite's public/ (e.g. pcm-worklet.js for streaming STT)."""
+    if filename != "index.html":
+        candidate = (frontend / filename).resolve()
+        if candidate.parent == frontend.resolve() and candidate.is_file():
+            return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+    return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
+
 @app.get("/candidate/")
 def candidate_page():
     return _react_index()

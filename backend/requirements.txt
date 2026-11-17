@@ -28,6 +28,8 @@ jinja2==3.1.4
 
 # AI — Agent 1 (optional Groq) + Agent 4 STT (Whisper via Groq)
 groq==1.5.0
+# Agent 4 streaming STT (Azure Speech continuous recognition; INTERVIEW_STT_MODE=streaming)
+azure-cognitiveservices-speech>=1.40.0,<2
 # Agent 4 TTS — Edge (fast CPU). Default for Azure VMs / production.
 edge-tts>=6.1.0
 miniaudio>=1.59

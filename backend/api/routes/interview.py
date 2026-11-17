@@ -1,7 +1,8 @@
 """FastAPI routes for interview scheduling."""
 
+import asyncio
 import logging
-
+import time
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -459,8 +460,11 @@ async def join_interview(
 
     snapshot = dict(candidate.evaluation_snapshot or {})
     agent5_meta = dict(snapshot.get("agent5") or {})
+    join_t0 = time.perf_counter()
     try:
-        payload = bootstrap_agent5_session(
+        # Sync SQLAlchemy + JWT bootstrap — keep off the event loop.
+        payload = await asyncio.to_thread(
+            bootstrap_agent5_session,
             candidate_id=candidate.candidate_id,
             full_name=candidate.full_name,
             email=candidate.email,
@@ -479,6 +483,12 @@ async def join_interview(
                 "Check AGENT5_SECRET_KEY and that PostgreSQL schema 'agent5' is available."
             ),
         ) from exc
+    logger.info(
+        "Interview join bootstrap candidate=%s role=%s elapsed_ms=%.0f",
+        candidate.candidate_id,
+        participant_role,
+        (time.perf_counter() - join_t0) * 1000.0,
+    )
 
     # Never overwrite the candidate session token with an HR-scoped token.
     if participant_role == "candidate":

@@ -7,10 +7,12 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from agents.interview_agent.schemas import TranscribeResponse, TranscriptCorrection
 from agents.screening_agent.config import settings
+from agents.shared.latency_trace import record_event, record_ms, record_unavailable, record_value
 from agents.shared.model_catalog import describe_target, ordered_targets, should_fallback
 from schemas.settings import AICatalogEntry
 
@@ -78,6 +80,10 @@ def transcribe_audio_bytes(
     lang = language or "en"
     provider = "groq_whisper"
     model_name = WHISPER_MODEL
+    stt_retries = 0
+    record_value("stt_audio_bytes", len(content))
+    record_event("stt_provider_request_start")
+    stt_t0 = time.perf_counter()
     for index, entry in enumerate(targets):
         try:
             text, duration, lang, provider, model_name = _transcribe_with_entry(
@@ -94,6 +100,7 @@ def transcribe_audio_bytes(
             break
         except Exception as exc:
             last_error = exc
+            stt_retries += 1
             if index < len(targets) - 1 and should_fallback(exc):
                 nxt = targets[index + 1]
                 logger.warning(
@@ -103,7 +110,19 @@ def transcribe_audio_bytes(
                     describe_target(nxt),
                 )
                 continue
+            record_ms("stt_ms", (time.perf_counter() - stt_t0) * 1000.0)
+            record_value("stt_error_count", stt_retries)
             raise
+    record_ms("stt_ms", (time.perf_counter() - stt_t0) * 1000.0)
+    record_event("stt_provider_request_end")
+    record_value("stt_provider", provider)
+    record_value("stt_model", model_name)
+    record_value("stt_retry_count", max(0, stt_retries - (1 if last_error else 0)))
+    record_value("stt_error_count", 1 if last_error else 0)
+    if duration is not None:
+        record_value("stt_audio_duration_seconds", float(duration))
+    else:
+        record_unavailable("stt_audio_duration_seconds")
     if last_error:
         raise last_error
 
@@ -116,6 +135,9 @@ def transcribe_audio_bytes(
     final_text = raw_text
     resume_corrected = False
     corrections: list[TranscriptCorrection] = []
+    correction_status: str | None = None
+    correction_tier: str | None = None
+    needs_llm_correction = False
 
     if (
         not partial
@@ -131,16 +153,30 @@ def transcribe_audio_bytes(
         )
         final_text = str(fixed.get("text") or raw_text).strip()
         resume_corrected = bool(fixed.get("resume_corrected"))
+        correction_status = str(fixed.get("correction_status") or "") or None
+        correction_tier = str(fixed.get("correction_tier") or "") or None
+        needs_llm_correction = bool(fixed.get("needs_llm_correction"))
         for item in fixed.get("corrections") or []:
             if isinstance(item, dict):
                 try:
                     corrections.append(TranscriptCorrection(**item))
                 except Exception:
                     continue
+    else:
+        record_unavailable("transcript_correction_ms")
+        record_unavailable("llm_correction_ms")
+        if partial:
+            correction_status = "skipped"
+        elif raw_text:
+            from agents.interview_agent.stt_corrector import classify_correction_tier
+
+            correction_tier = classify_correction_tier(raw_text, resume_terms=resume_terms)
+            correction_status = "skipped"
 
     return TranscribeResponse(
         text=final_text,
-        raw_text=raw_text if resume_corrected else None,
+        # Always surface STT raw for final turns (additive; clients that ignore it are fine).
+        raw_text=None if partial else (raw_text or None),
         language=lang,
         duration_seconds=float(duration) if duration is not None else None,
         provider=provider,
@@ -148,6 +184,9 @@ def transcribe_audio_bytes(
         resume_corrected=resume_corrected,
         partial=partial,
         corrections=corrections,
+        correction_status=correction_status,
+        correction_tier=correction_tier,
+        needs_llm_correction=needs_llm_correction,
     )
 
 
@@ -432,25 +471,53 @@ def _azure_recognize_once(
     payload: bytes,
     content_type: str,
 ) -> tuple[str, float | None]:
-    import httpx
+    from agents.shared.azure_concurrency import azure_slot
+    from agents.shared.azure_http import get_azure_http_client
+    from agents.shared.azure_retry import call_with_azure_retries
 
-    response = httpx.post(
-        url,
-        params={"language": locale, "format": "detailed"},
-        headers={
-            "Ocp-Apim-Subscription-Key": key,
-            "Content-Type": content_type,
-            "Accept": "application/json",
-        },
-        content=payload,
-        timeout=90,
-    )
-    if response.status_code >= 400:
-        detail = (response.text or response.reason_phrase or "").strip()[:180]
-        raise RuntimeError(
-            "Azure Speech STT rejected this clip. Record a few seconds of speech and try again. "
-            f"({response.status_code}: {detail or 'bad audio or language'})"
+    client = get_azure_http_client("speech")
+
+    class _SttHttpError(RuntimeError):
+        def __init__(self, status_code: int, detail: str, headers: dict | None = None):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    def _once():
+        response = client.post(
+            url,
+            params={"language": locale, "format": "detailed"},
+            headers={
+                "Ocp-Apim-Subscription-Key": key,
+                "Content-Type": content_type,
+                "Accept": "application/json",
+            },
+            content=payload,
+            timeout=90,
         )
+        if response.status_code >= 400:
+            detail = (response.text or response.reason_phrase or "").strip()[:180]
+            raise _SttHttpError(
+                response.status_code,
+                "We could not process that audio clip. Please speak clearly for a few seconds and try again.",
+                headers=dict(response.headers),
+            )
+        return response
+
+    t0 = time.perf_counter()
+    with azure_slot("stt"):
+        try:
+            response = call_with_azure_retries(
+                "speech-stt",
+                _once,
+                status_of=lambda exc: getattr(exc, "status_code", None),
+            )
+        except _SttHttpError as exc:
+            record_ms("stt_recognition_completion_ms", (time.perf_counter() - t0) * 1000.0)
+            record_value("stt_http_status", int(exc.status_code))
+            raise RuntimeError(str(exc)) from exc
+    record_ms("stt_recognition_completion_ms", (time.perf_counter() - t0) * 1000.0)
+    record_value("stt_http_status", int(response.status_code))
     body = response.json() if response.content else {}
     text = str(body.get("DisplayText") or body.get("Text") or "").strip()
     if not text:
@@ -460,8 +527,8 @@ def _azure_recognize_once(
     if not text:
         status = str(body.get("RecognitionStatus") or "").strip()
         if status and status.lower() not in {"success", "successwithpartialresult"}:
-            raise RuntimeError(f"Azure Speech returned no transcript ({status}).")
-        raise RuntimeError("Azure Speech returned an empty transcript.")
+            raise RuntimeError("We could not hear your answer clearly. Please speak again after the question.")
+        raise RuntimeError("We could not hear your answer clearly. Please speak again after the question.")
     duration_ticks = body.get("Duration")
     duration = None
     if duration_ticks is not None:
@@ -487,8 +554,11 @@ def _transcribe_azure_speech(
         or f"https://{region}.stt.speech.microsoft.com"
     ).rstrip("/")
     if not key:
-        raise RuntimeError("Azure Speech key is not configured in SuperAdmin → API & Integration.")
+        raise RuntimeError("Speech recognition is not configured. Please contact the interview administrator.")
+    upload_t0 = time.perf_counter()
     payload, content_type = _to_azure_wav(content, suffix)
+    # Convert+prepare bytes for Azure; not network upload — named for pipeline stage clarity.
+    record_ms("stt_upload_prepare_ms", (time.perf_counter() - upload_t0) * 1000.0)
     locale = _azure_locale(language)
     url = f"{endpoint}/speech/recognition/conversation/cognitiveservices/v1"
     wav_type = "audio/wav; codecs=audio/pcm; samplerate=16000"
@@ -525,7 +595,7 @@ def _transcribe_azure_speech(
                 logger.exception("Azure STT chunk %s/%s failed", index + 1, len(chunks))
         text = _join_transcript_chunks(texts)
         if not text:
-            raise RuntimeError("Azure Speech returned an empty transcript.")
+            raise RuntimeError("We could not hear your answer clearly. Please speak again after the question.")
         return text, duration, language or "en-IN", "azure_speech", entry.model_id or "azure-speech"
 
     text, recognized_duration = _azure_recognize_once(

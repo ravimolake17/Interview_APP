@@ -33,6 +33,7 @@ export function McqPanel({
   const question = mcq.current_question
   const total = mcq.total_questions || 0
   const current = Math.min(total, (mcq.current_index || 0) + (question ? 1 : 0))
+  const awaitingIntro = mcq.status === 'pending' || busy
   const locked = Boolean(lockedOptionId) || busy || isHr || mcq.status !== 'in_progress'
 
   return (
@@ -52,9 +53,13 @@ export function McqPanel({
     >
       <div className="mcq-toolbar">
         <span className="mcq-progress">MCQ {current || 0} of {total}</span>
-        <span className={`mcq-timer${remainingSeconds <= 30 ? ' warn' : ''}`}>{formatClock(remainingSeconds)}</span>
+        <span className={`mcq-timer${remainingSeconds <= 30 ? ' warn' : ''}`}>
+          {awaitingIntro && mcq.status === 'pending' ? 'Listen…' : formatClock(remainingSeconds)}
+        </span>
       </div>
-      {question ? (
+      {mcq.status === 'pending' ? (
+        <p className="mcq-question">Please listen to the AI introduction. Options unlock when it finishes.</p>
+      ) : question ? (
         <>
           <p className="mcq-question" onMouseDown={blockCopy}>{question.question_text}</p>
           <div className="mcq-options" role="group" aria-label="Answer options">

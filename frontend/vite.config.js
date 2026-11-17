@@ -7,11 +7,13 @@ export default defineConfig({
     port: 5173,
     // Cloudflare Tunnel can reach this dev server. Candidate email links are
     // NOT built here — set FRONTEND_URL in backend/.env to the public tunnel URL.
-    allowedHosts: ['.trycloudflare.com', '.loca.lt', '.ngrok-free.app', '.ngrok.io'],
+    allowedHosts: ['.trycloudflare.com', '.loca.lt', '.ngrok-free.app', '.ngrok.io','.localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:8030',
         changeOrigin: true,
+        // Interview STT streams over WebSocket under /api/interview/room/.../ai/stt-stream.
+        ws: true,
       },
       '/screening-files': {
         target: 'http://localhost:8030',

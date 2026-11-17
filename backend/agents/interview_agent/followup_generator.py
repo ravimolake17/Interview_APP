@@ -14,8 +14,17 @@ from agents.interview_agent.question_generator import (
 from agents.interview_agent.schemas import FollowUpQuestion
 
 _THIN_ANSWER = re.compile(
-    r"\b(i don'?t know|dont know|no idea|not sure|skip(?: it)?|pass|"
-    r"no comment|nothing|can'?t answer|cannot answer|no answer)\b",
+    r"\b("
+    r"i don'?t know|dont know|do not know|no idea|not sure|"
+    r"i'?m sorry|sorry|skip(?: it)?|pass|no comment|nothing|"
+    r"can'?t answer|cannot answer|no answer|no response|"
+    r"i have no idea|nothing to say|blank"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_EXPLICIT_SKIP = re.compile(
+    r"^\s*(\[?\s*no response\s*\]?|n/?a|na|none|nil|-)\s*$",
     re.IGNORECASE,
 )
 
@@ -34,9 +43,18 @@ _TEAM_LANGUAGE = re.compile(
 
 def answer_is_thin(text: str) -> bool:
     cleaned = (text or "").strip()
-    if len(cleaned.split()) < 18:
+    if not cleaned:
         return True
-    return bool(_THIN_ANSWER.search(cleaned))
+    if _EXPLICIT_SKIP.match(cleaned):
+        return True
+    words = cleaned.split()
+    # Explicit don't-know / sorry fillers (even if slightly longer).
+    if _THIN_ANSWER.search(cleaned) and len(words) < 25:
+        return True
+    # Extremely short replies with no substance.
+    if len(words) < 6:
+        return True
+    return False
 
 
 def answer_warrants_followup(

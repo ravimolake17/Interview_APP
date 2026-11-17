@@ -92,8 +92,97 @@ _STOP_WORDS = {
 
 
 def resume_correction_enabled() -> bool:
+    """Master switch — preserved for production compatibility (default true)."""
     raw = (os.getenv("STT_RESUME_CORRECTION") or "true").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def llm_correction_mode() -> str:
+    """Where GPT-4o resume correction runs: deferred | inline | off.
+
+    Environment ``STT_LLM_CORRECTION_MODE`` overrides settings when set.
+    """
+    env = (os.getenv("STT_LLM_CORRECTION_MODE") or "").strip().lower()
+    if env in {"deferred", "inline", "off"}:
+        return env
+    try:
+        from core.config import get_settings
+
+        mode = str(getattr(get_settings(), "stt_llm_correction_mode", "deferred") or "deferred")
+        mode = mode.strip().lower()
+        if mode in {"deferred", "inline", "off"}:
+            return mode
+    except Exception:
+        pass
+    return "deferred"
+
+
+_SHORT_ANSWER_RE = re.compile(
+    r"^(?:"
+    r"yes|yeah|yep|yup|yea|"
+    r"no|nope|nah|"
+    r"ok|okay|sure|alright|all right|"
+    r"correct|right|true|false|"
+    r"maybe|perhaps|"
+    r"pass|skip|"
+    r"none|nothing|n/?a|"
+    r"i\s*don'?t\s*know|i\s*do\s*not\s*know|don'?t\s*know|no\s*idea|not\s*sure|"
+    r"same|agreed|agree"
+    r")[\s.!?,]*$",
+    re.IGNORECASE,
+)
+
+_TECH_TOKEN_RE = re.compile(
+    r"(?:"
+    r"\b(?i:api|sdk|sql|nosql|aws|gcp|azure|gpu|cpu|http|https|json|xml|rest|graphql|"
+    r"docker|kubernetes|k8s|redis|kafka|spark|hadoop|pytorch|tensorflow|fastapi|"
+    r"react|node\.?js|typescript|python|java|golang|rust|c\+\+|cuda|numpy|pandas|"
+    r"mongodb|postgres|postgresql|mysql|llm|rag|mlops|ci/?cd)\b"
+    r"|[A-Z][a-z]+[A-Z]\w*"  # CamelCase (case-sensitive)
+    r"|\b[A-Za-z]{2,}[-.][A-Za-z0-9]{2,}\b"  # hyphen/dot libs
+    r"|\b[A-Z]{2,}[a-z]*\d+\b"  # EC2, S3, GPT4-ish
+    r")"
+)
+
+
+def is_short_answer(text: str) -> bool:
+    cleaned = " ".join((text or "").split()).strip()
+    if not cleaned:
+        return True
+    if len(cleaned) <= 48 and _SHORT_ANSWER_RE.match(cleaned):
+        return True
+    words = cleaned.split()
+    return len(words) <= 3 and len(cleaned) <= 24
+
+
+def classify_correction_tier(
+    text: str,
+    *,
+    resume_terms: list[str] | None = None,
+    question_text: str | None = None,
+) -> str:
+    """Return short | normal | technical for staged correction."""
+    cleaned = " ".join((text or "").split()).strip()
+    if is_short_answer(cleaned):
+        return "short"
+    words = cleaned.split()
+    if len(words) >= 35:
+        return "technical"
+    if _TECH_TOKEN_RE.search(cleaned):
+        return "technical"
+    q = (question_text or "").lower()
+    if any(token in q for token in ("implement", "architect", "algorithm", "design", "debug", "scale")):
+        if len(words) >= 12:
+            return "technical"
+    # Long-ish answers that cite multi-word resume project titles → technical.
+    lowered = cleaned.lower()
+    for term in (resume_terms or [])[:30]:
+        t = str(term or "").strip()
+        if " " not in t and "-" not in t:
+            continue
+        if len(t) >= 8 and t.lower() in lowered:
+            return "technical"
+    return "normal"
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -828,7 +917,10 @@ def _llm_correct(
     question_text: str | None,
     candidate_name: str | None,
 ) -> tuple[str, list[dict[str, str]]]:
+    from agents.shared.latency_trace import record_event, record_ms, record_unavailable
+
     if not resume_terms or not llama_available():
+        record_unavailable("llm_correction_ms")
         return text, []
 
     vocab = ", ".join(resume_terms[:50])
@@ -855,6 +947,10 @@ Question: {(question_text or "N/A")[:400]}
 Transcript:
 {text}
 """
+    import time
+
+    record_event("llm_correction_start")
+    t0 = time.perf_counter()
     try:
         data = call_llama_json(
             system_prompt,
@@ -863,8 +959,12 @@ Transcript:
             max_tokens=1200,
         )
     except Exception as exc:
+        record_ms("llm_correction_ms", (time.perf_counter() - t0) * 1000.0)
+        record_event("llm_correction_end")
         logger.warning("Resume STT LLM correction failed: %s", exc)
         return text, []
+    record_ms("llm_correction_ms", (time.perf_counter() - t0) * 1000.0)
+    record_event("llm_correction_end")
 
     safe: list[dict[str, str]] = []
     for item in data.get("corrections") or []:
@@ -928,6 +1028,41 @@ def apply_deterministic_corrections(
     return out, corrections
 
 
+def apply_deferred_llm_correction(
+    text: str,
+    *,
+    context: dict[str, str] | None = None,
+    resume_terms: list[str] | None = None,
+    question_text: str | None = None,
+    candidate_name: str | None = None,
+) -> dict[str, Any]:
+    """Run GPT-4o resume correction only (used by eval worker before Agent 6)."""
+    cleaned = (text or "").strip()
+    if not cleaned or not resume_correction_enabled() or llm_correction_mode() == "off":
+        return {
+            "text": cleaned,
+            "raw_text": cleaned,
+            "resume_corrected": False,
+            "corrections": [],
+            "correction_status": "skipped",
+        }
+    out, llm_fixes = _llm_correct(
+        cleaned,
+        context=context or {},
+        resume_terms=resume_terms or [],
+        question_text=question_text,
+        candidate_name=candidate_name,
+    )
+    changed = out != cleaned
+    return {
+        "text": out,
+        "raw_text": cleaned,
+        "resume_corrected": changed,
+        "corrections": llm_fixes,
+        "correction_status": "complete" if changed or not llm_fixes else "complete",
+    }
+
+
 def correct_transcript_with_resume(
     raw_text: str,
     *,
@@ -935,8 +1070,14 @@ def correct_transcript_with_resume(
     resume_terms: list[str],
     question_text: str | None = None,
     candidate_name: str | None = None,
+    force_llm: bool | None = None,
 ) -> dict[str, Any]:
-    """Full resume-driven correction pipeline for any candidate."""
+    """Staged resume-driven correction for the candidate-visible STT path.
+
+    - short: deterministic only
+    - normal: deterministic only (avoid GPT-4o on hot path)
+    - technical: deterministic now; LLM deferred unless mode=inline
+    """
     cleaned = (raw_text or "").strip()
     if not cleaned or not resume_correction_enabled():
         return {
@@ -944,29 +1085,71 @@ def correct_transcript_with_resume(
             "raw_text": cleaned,
             "resume_corrected": False,
             "corrections": [],
+            "correction_tier": "short" if is_short_answer(cleaned) else "normal",
+            "correction_status": "skipped",
+            "needs_llm_correction": False,
         }
 
+    import time
+
+    from agents.shared.latency_trace import record_event, record_ms, record_unavailable
+
+    tier = classify_correction_tier(
+        cleaned,
+        resume_terms=resume_terms,
+        question_text=question_text,
+    )
+    mode = llm_correction_mode()
+
+    record_event("transcript_correction_start")
+    det_t0 = time.perf_counter()
     text, corrections = apply_deterministic_corrections(
         cleaned,
         resume_terms=resume_terms or [],
         candidate_name=candidate_name,
         job_position=(context or {}).get("job_position"),
     )
+    record_ms("transcript_correction_ms", (time.perf_counter() - det_t0) * 1000.0)
+    record_event("transcript_correction_end")
 
-    text, llm_fixes = _llm_correct(
-        text,
-        context=context or {},
-        resume_terms=resume_terms or [],
-        question_text=question_text,
-        candidate_name=candidate_name,
-    )
-    corrections.extend(llm_fixes)
+    run_llm_now = False
+    needs_llm_later = False
+    if force_llm is True:
+        run_llm_now = True
+    elif force_llm is False:
+        run_llm_now = False
+    elif mode == "off" or tier == "short":
+        run_llm_now = False
+    elif mode == "inline":
+        # Compatibility: previous hot-path GPT-4o correction (skip obvious short answers).
+        run_llm_now = tier in {"normal", "technical"}
+    else:
+        # deferred (default): never block the candidate on GPT-4o.
+        # Technical answers get optional LLM before Agent 6 scoring.
+        run_llm_now = False
+        needs_llm_later = tier == "technical"
+
+    if run_llm_now:
+        text, llm_fixes = _llm_correct(
+            text,
+            context=context or {},
+            resume_terms=resume_terms or [],
+            question_text=question_text,
+            candidate_name=candidate_name,
+        )
+        corrections.extend(llm_fixes)
+        status = "complete"
+    else:
+        record_unavailable("llm_correction_ms")
+        status = "pending_llm" if needs_llm_later else "deterministic_only"
 
     changed = text != cleaned
     if changed:
         logger.info(
-            "STT resume corrections (%s): %s",
+            "STT resume corrections (%s tier=%s status=%s): %s",
             len(corrections),
+            tier,
+            status,
             corrections[:5],
         )
     return {
@@ -974,6 +1157,9 @@ def correct_transcript_with_resume(
         "raw_text": cleaned,
         "resume_corrected": changed,
         "corrections": corrections,
+        "correction_tier": tier,
+        "correction_status": status,
+        "needs_llm_correction": needs_llm_later,
     }
 
 

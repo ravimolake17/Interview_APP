@@ -79,11 +79,29 @@ export async function requestJson<T>(path: string, options: RequestInit = {}, to
   return body as T
 }
 
+export type BlobRequestResult = {
+  blob: Blob
+  headers: Headers
+  /** Monotonic client fetch+download duration (ms). */
+  downloadMs: number
+}
+
 export async function requestBlob(path: string, options: RequestInit = {}, token?: string, timeoutMs = 120_000): Promise<Blob> {
+  const result = await requestBlobDetailed(path, options, token, timeoutMs)
+  return result.blob
+}
+
+export async function requestBlobDetailed(
+  path: string,
+  options: RequestInit = {},
+  token?: string,
+  timeoutMs = 120_000,
+): Promise<BlobRequestResult> {
   const headers = new Headers(options.headers)
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const controller = new AbortController()
   const timeout = window.setTimeout(() => controller.abort(new DOMException('Request timed out', 'TimeoutError')), timeoutMs)
+  const t0 = performance.now()
   try {
     const response = await fetch(resolveApiUrl(path), { ...options, headers, signal: controller.signal })
     if (!response.ok) {
@@ -93,7 +111,12 @@ export async function requestBlob(path: string, options: RequestInit = {}, token
         : body
       throw new ApiError(response.status, detail)
     }
-    return response.blob()
+    const blob = await response.blob()
+    return {
+      blob,
+      headers: response.headers,
+      downloadMs: Math.round((performance.now() - t0) * 1000) / 1000,
+    }
   } finally {
     window.clearTimeout(timeout)
   }

@@ -21,6 +21,7 @@ from api.routes import (
     auth,
     blueprint,
     candidate_interview,
+    candidate_interview_stt_ws,
     candidates,
     evaluation_agent,
     fraud_agent,
@@ -67,6 +68,26 @@ async def lifespan(app: FastAPI):
                 "Run `alembic upgrade head`.",
                 exc_info=True,
             )
+    try:
+        from agents.interview_agent.streaming_stt import interview_stt_mode, streaming_stt_available
+
+        mode = interview_stt_mode()
+        available = streaming_stt_available()
+        logger.info(
+            "Interview STT mode=%s streaming_available=%s effective=%s defer_eval=%s live_adaptive_fu=%s",
+            mode,
+            available,
+            mode if (mode != "streaming" or available) else "batch",
+            getattr(settings, "interview_defer_eval_until_end", True),
+            getattr(settings, "interview_live_adaptive_followups", False),
+        )
+        if mode == "streaming" and not available:
+            logger.warning(
+                "INTERVIEW_STT_MODE=streaming but speech key/SDK unavailable — "
+                "oral turns will use batch STT until SuperAdmin speech secrets load."
+            )
+    except Exception:
+        logger.debug("STT mode startup probe skipped", exc_info=True)
 
     worker_pool = None
     if screening_settings.SCREENING_QUEUE_ENABLED and screening_settings.SCREENING_EMBED_WORKERS:
@@ -131,6 +152,26 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Interview eval worker could not start", exc_info=True)
 
+    # Warm Agent5 models in the background so first /state or /start is not a 30s+ cold load.
+    try:
+        import asyncio
+
+        async def _warmup_agent5_models() -> None:
+            await asyncio.sleep(0.5)
+            try:
+                from agents.proctoring_agent.api.candidate import _mandatory_model_readiness
+
+                result = await asyncio.to_thread(_mandatory_model_readiness)
+                ready = {k: bool(v.get("ready")) for k, v in (result or {}).items()}
+                logger.info("Agent5 model warmup complete: %s", ready)
+            except Exception:
+                logger.warning("Agent5 model warmup failed", exc_info=True)
+
+        if agent5_startup.get("ok"):
+            asyncio.create_task(_warmup_agent5_models())
+    except Exception:
+        logger.debug("Agent5 model warmup could not be scheduled", exc_info=True)
+
     yield
     try:
         from services.interview_eval_queue import stop_interview_eval_worker
@@ -149,6 +190,12 @@ async def lifespan(app: FastAPI):
         shutdown_agent5()
     except Exception:
         logger.debug("Agent5 shutdown skipped", exc_info=True)
+    try:
+        from agents.shared.azure_http import close_azure_http_clients
+
+        close_azure_http_clients()
+    except Exception:
+        logger.debug("Azure HTTP client shutdown skipped", exc_info=True)
     if worker_pool is not None:
         await worker_pool.stop()
     await engine.dispose()
@@ -229,6 +276,7 @@ async def runtime_config():
 app.include_router(auth.router, prefix=settings.api_prefix)
 app.include_router(interview.router, prefix=settings.api_prefix)
 app.include_router(candidate_interview.router, prefix=settings.api_prefix)
+app.include_router(candidate_interview_stt_ws.router, prefix=settings.api_prefix)
 app.include_router(candidates.router, prefix=settings.api_prefix)
 app.include_router(hr.router, prefix=settings.api_prefix)
 app.include_router(jobs.router, prefix=settings.api_prefix)
@@ -304,6 +352,15 @@ if settings.agent5_embedded:
         @app.get("/monitor/")
         async def monitor_page():
             return _agent5_index()
+
+        @app.get("/proctoring/{filename}")
+        async def proctoring_root_file(filename: str):
+            """Top-level build files from Vite's public/ (e.g. pcm-worklet.js for streaming STT)."""
+            if _agent5_frontend and filename != "index.html":
+                candidate = (_agent5_frontend / filename).resolve()
+                if candidate.parent == _agent5_frontend.resolve() and candidate.is_file():
+                    return FileResponse(candidate, headers={"Cache-Control": "no-cache"})
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
         if _agent5_frontend and _agent5_frontend.exists():
             app.mount(
@@ -414,8 +471,23 @@ async def health_live():
 @app.get("/health")
 async def health_check():
     from core.chroma_runtime import chroma_status
+    from core.redis_client import using_memory_fallback
 
     chroma = chroma_status()
+    concurrency = {}
+    eval_queue = {}
+    try:
+        from agents.shared.azure_concurrency import azure_concurrency_snapshot
+
+        concurrency = azure_concurrency_snapshot()
+    except Exception:
+        concurrency = {}
+    try:
+        from services.interview_eval_queue import eval_queue_stats
+
+        eval_queue = eval_queue_stats()
+    except Exception:
+        eval_queue = {}
     return {
         "status": "healthy",
         "agents": [
@@ -428,6 +500,10 @@ async def health_check():
             "HR Recommendation (Agent 7)",
         ],
         "chroma": chroma,
+        "redis_memory_fallback": using_memory_fallback(),
+        "azure_concurrency": concurrency,
+        "interview_eval_queue": eval_queue,
+        "uvicorn_workers_policy": 1,
     }
 
 

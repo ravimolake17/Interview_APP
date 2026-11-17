@@ -116,6 +116,10 @@ class TranscribeResponse(BaseModel):
     resume_corrected: bool = False
     partial: bool = False
     corrections: list[TranscriptCorrection] = Field(default_factory=list)
+    # Additive Phase 1 fields (backward compatible).
+    correction_status: str | None = None  # skipped|deterministic_only|pending_llm|complete|failed
+    correction_tier: str | None = None  # short|normal|technical
+    needs_llm_correction: bool = False
 
 
 class InterviewAgentStatusResponse(BaseModel):
@@ -158,12 +162,17 @@ class InterviewSessionStateResponse(BaseModel):
     duration_extended: bool = False
     interview_phase: str | None = None
     turn_ack: str | None = None
+    # Additive Phase 3: ack + question in one utterance when combine mode is on.
+    spoken_prompt: str | None = None
+    tts_combine_ack: bool = False
 
 
 class SpeakRequest(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     question_id: str | None = None
     voice: str | None = Field(default="female", description="female | male")
+    # When true with question_id, prefer streaming MP3 path if enabled.
+    stream: bool = False
 
 
 class McqOption(BaseModel):

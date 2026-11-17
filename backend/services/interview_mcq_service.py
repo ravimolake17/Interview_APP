@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -232,11 +234,20 @@ async def ensure_mcq(
         evaluation_snapshot=snap,
         job_position=candidate.job_position,
     )
-    questions = generate_mcq_questions(
+    # LLM generation is sync/blocking — never run on the FastAPI event loop.
+    t0 = time.perf_counter()
+    questions = await asyncio.to_thread(
+        generate_mcq_questions,
         count=count,
         job_title=candidate.job_position,
         resume_context=resume_context,
         seed=candidate.candidate_id,
+    )
+    logger.info(
+        "MCQ generation finished candidate=%s questions=%s elapsed_ms=%.0f",
+        candidate.candidate_id,
+        len(questions),
+        (time.perf_counter() - t0) * 1000.0,
     )
     first_name = (candidate.full_name or "").split()[0] if candidate.full_name else "there"
     company = await _company_name(db, candidate)
@@ -262,15 +273,31 @@ async def ensure_mcq(
 
 
 async def start_mcq(db: AsyncSession, candidate: Candidate, planned_minutes: int | None = None) -> dict[str, Any]:
+    """Idempotent: pending→in_progress; already in_progress/terminal returns current record."""
+    t0 = time.perf_counter()
     record = await ensure_mcq(db, candidate, planned_minutes=planned_minutes)
     record = _expire_if_needed(record)
     if str(record.get("status") or "") in TERMINAL:
-        return await _save(db, candidate, record)
+        saved = await _save(db, candidate, record)
+        logger.info(
+            "MCQ start no-op terminal candidate=%s status=%s elapsed_ms=%.0f",
+            candidate.candidate_id,
+            saved.get("status"),
+            (time.perf_counter() - t0) * 1000.0,
+        )
+        return saved
     if str(record.get("status") or "") != "in_progress":
         record["status"] = "in_progress"
         record["started_at"] = record.get("started_at") or _iso()
         record["current_index"] = int(record.get("current_index") or 0)
-    return await _save(db, candidate, record)
+    saved = await _save(db, candidate, record)
+    logger.info(
+        "MCQ start candidate=%s status=%s elapsed_ms=%.0f",
+        candidate.candidate_id,
+        saved.get("status"),
+        (time.perf_counter() - t0) * 1000.0,
+    )
+    return saved
 
 
 async def submit_mcq(

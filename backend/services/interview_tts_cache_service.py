@@ -75,18 +75,68 @@ class InterviewTTSCacheService:
             if commit_each:
                 await self.db.commit()
 
+        from agents.interview_agent.tts_cache_keys import cache_fingerprint
+        from agents.shared.model_catalog import ordered_targets, voice_for_entry
+
+        default_voice = TTS_VOICE
+        targets = ordered_targets("tts")
+        if targets:
+            default_voice = voice_for_entry(targets[0]) or TTS_VOICE
+
         for item in questions:
             qid = str(item.get("id") or "").strip()
             text = str(item.get("question_text") or "").strip()
             if not qid or not text:
                 continue
             try:
-                result = await asyncio.to_thread(synthesize_speech, text)
+                expected_hash = cache_fingerprint(
+                    text, voice=default_voice, content_type="audio/wav"
+                )
+                # Also accept legacy text-only hashes for existing rows.
+                legacy_hash = text_hash(text)
+                existing = await self.audio_repo.get_for_question(
+                    question_set_id=question_set_id, question_id=qid
+                )
+                if (
+                    existing
+                    and existing.status == "READY"
+                    and existing.voice == default_voice
+                    and existing.text_hash in {expected_hash, legacy_hash}
+                    and read_audio_file(existing.file_path)
+                ):
+                    try:
+                        from services.interview_speed_cache import cache_tts_audio
+
+                        data = read_audio_file(existing.file_path) or b""
+                        cache_tts_audio(
+                            candidate_id,
+                            qid,
+                            data,
+                            voice=existing.voice,
+                            content_type=existing.content_type,
+                            text_hash=existing.text_hash,
+                        )
+                    except Exception:
+                        logger.debug("Redis TTS warm skipped for %s", qid, exc_info=True)
+                    ready += 1
+                    continue
+
+                result = await asyncio.to_thread(synthesize_speech, text, voice=default_voice)
                 rel = write_audio_file(candidate_id, qid, result["audio_bytes"])
+                voice = str(result.get("voice") or default_voice)
+                content_type = str(result.get("content_type") or "audio/wav")
+                fp = cache_fingerprint(text, voice=voice, content_type=content_type)
                 try:
                     from services.interview_speed_cache import cache_tts_audio
 
-                    cache_tts_audio(candidate_id, qid, result["audio_bytes"])
+                    cache_tts_audio(
+                        candidate_id,
+                        qid,
+                        result["audio_bytes"],
+                        voice=voice,
+                        content_type=content_type,
+                        text_hash=fp,
+                    )
                 except Exception:
                     logger.debug("Redis TTS cache skipped for %s", qid, exc_info=True)
                 await self.audio_repo.upsert_ready(
@@ -94,12 +144,12 @@ class InterviewTTSCacheService:
                     question_set_id=question_set_id,
                     question_id=qid,
                     question_text=text,
-                    text_hash=text_hash(text),
+                    text_hash=fp,
                     file_path=rel,
-                    content_type=str(result.get("content_type") or "audio/wav"),
+                    content_type=content_type,
                     provider=str(result.get("provider") or "indic_parler_tts"),
                     model=str(result.get("model") or TTS_MODEL),
-                    voice=str(result.get("voice") or TTS_VOICE),
+                    voice=voice,
                     byte_size=len(result["audio_bytes"]),
                 )
                 ready += 1

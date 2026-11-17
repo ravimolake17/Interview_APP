@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Response, UploadFile
+from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +22,7 @@ from agents.interview_agent.schemas import (
     SpeakRequest,
     TranscribeResponse,
 )
+from agents.shared.latency_trace import HEADER_TURN_ID, LatencyTurn, latency_turn
 from api.deps import get_current_user
 from api.tenancy import accessible_candidate
 from models.candidate import Candidate
@@ -77,6 +79,21 @@ class HrLiveControlIn(BaseModel):
     target_index: int | None = Field(default=None, ge=0)
     ask_now: bool = True
     message: str | None = Field(default=None, max_length=2000)
+
+
+class LatencyBeaconRequest(BaseModel):
+    """Client-side monotonic span dump (ms). No PII / audio / transcript."""
+
+    turn_id: str = Field(min_length=8, max_length=64)
+    session_id: str | None = Field(default=None, max_length=128)
+    phase: str | None = Field(default=None, max_length=64)
+    spans: dict[str, float | None] = Field(default_factory=dict)
+    events: list[str] = Field(default_factory=list, max_length=64)
+
+
+def _apply_latency_headers(response: Response, turn: LatencyTurn) -> None:
+    for key, value in turn.response_headers().items():
+        response.headers[key] = value
 
 
 def _require_hr_participant(payload: dict) -> None:
@@ -144,6 +161,14 @@ async def get_room_runtime(
         if company:
             company_name = company.name
             company_code = company.code
+    from agents.interview_agent.streaming_stt import (
+        end_silence_ms,
+        interview_stt_mode,
+        streaming_stt_available,
+    )
+
+    mode = interview_stt_mode()
+    streaming_ok = streaming_stt_available()
     return {
         "candidate_id": candidate.candidate_id,
         "full_name": candidate.full_name,
@@ -158,6 +183,10 @@ async def get_room_runtime(
         "room_visit_open": bool(runtime.get("room_visit_open")),
         "can_rejoin": can_rejoin_room(runtime),
         "max_room_joins": MAX_ROOM_JOINS,
+        "interview_stt_mode": mode,
+        "streaming_stt_available": streaming_ok,
+        "effective_stt_mode": mode if (mode != "streaming" or streaming_ok) else "batch",
+        "end_silence_ms": end_silence_ms(),
     }
 
 
@@ -322,8 +351,10 @@ async def finish_room_mcq(
 async def submit_room_answer(
     session_id: str,
     payload: InterviewSessionAnswerRequest,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     authorization: str | None = Header(default=None),
+    x_interview_turn_id: str | None = Header(default=None, alias=HEADER_TURN_ID),
 ):
     _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
     if _mcq_blocks_oral(candidate):
@@ -331,31 +362,45 @@ async def submit_room_answer(
     runtime = runtime_from_snapshot(candidate)
     if runtime.get("state") == HR_INTERVENTION or runtime.get("hr_speaking"):
         raise HTTPException(status_code=409, detail="AI interviewer is paused while HR is speaking.")
-    agent = InterviewLangGraphAgent(db)
-    try:
-        state = await agent.submit_answer(candidate.candidate_id, payload.answer_text)
-    except Exception as exc:
-        logger.exception("Failed to submit in-app interview answer for %s", candidate.candidate_id)
-        raise HTTPException(status_code=400, detail=str(exc) or "No active AI interview session.") from exc
-    await _persist_latest_evaluation(db, candidate.candidate_id, state)
-    status = str(state.get("Status") or "")
-    await set_runtime_state(
-        db,
-        candidate.candidate_id,
-        COMPLETED if status == "COMPLETED" else AI_INTERVIEW_ACTIVE,
-        extra={"hr_speaking": False},
-    )
-    await db.commit()
-    response = _session_response(candidate.candidate_id, state)
-    await broadcast_ai_session(candidate, response.model_dump())
-    return response
+    with latency_turn(
+        turn_id=x_interview_turn_id,
+        session_id=session_id,
+        phase="answer",
+    ) as turn:
+        turn.mark("answer_api_start")
+        api_t0 = time.perf_counter()
+        agent = InterviewLangGraphAgent(db)
+        try:
+            state = await agent.submit_answer(candidate.candidate_id, payload.answer_text)
+        except Exception as exc:
+            logger.exception("Failed to submit in-app interview answer for %s", candidate.candidate_id)
+            raise HTTPException(status_code=400, detail=str(exc) or "No active AI interview session.") from exc
+        turn.mark("next_question_selection_complete")
+        persist_t0 = time.perf_counter()
+        await _persist_latest_evaluation(db, candidate.candidate_id, state)
+        status = str(state.get("Status") or "")
+        await set_runtime_state(
+            db,
+            candidate.candidate_id,
+            COMPLETED if status == "COMPLETED" else AI_INTERVIEW_ACTIVE,
+            extra={"hr_speaking": False},
+        )
+        await db.commit()
+        turn.set_ms("database_save_ms", (time.perf_counter() - persist_t0) * 1000.0)
+        turn.set_ms("answer_api_ms", (time.perf_counter() - api_t0) * 1000.0)
+        body = _session_response(candidate.candidate_id, state)
+        await broadcast_ai_session(candidate, body.model_dump())
+        _apply_latency_headers(response, turn)
+        return body
 
 
 @router.post("/sessions/{session_id}/ai/transcribe", response_model=TranscribeResponse)
 async def transcribe_room_answer(
     session_id: str,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     authorization: str | None = Header(default=None),
+    x_interview_turn_id: str | None = Header(default=None, alias=HEADER_TURN_ID),
     file: UploadFile = File(...),
     question_id: str | None = Form(default=None),
     partial: bool = Form(default=False),
@@ -363,55 +408,88 @@ async def transcribe_room_answer(
 ):
     _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
     service = InterviewAgentService(db)
-    content = await file.read()
-    if len(content) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Audio file too large (max 25MB).")
-    try:
-        result = await service.transcribe_answer(
-            candidate.candidate_id,
-            content=content,
-            filename=file.filename or "audio.webm",
-            question_id=(question_id or "").strip() or None,
-            partial=partial,
-            prior_text=(prior_text or "").strip() or None,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception:
-        logger.exception("Whisper transcription failed for in-app room %s", candidate.candidate_id)
-        raise HTTPException(status_code=500, detail="Transcription failed.") from None
-
-    if not partial:
-        from services.interview_oral_store import save_answer_audio, upsert_oral_turn
-
-        current_question: dict = {}
+    with latency_turn(
+        turn_id=x_interview_turn_id,
+        session_id=session_id,
+        phase="transcribe_partial" if partial else "transcribe",
+    ) as turn:
+        turn.mark("audio_reached_fastapi")
+        read_t0 = time.perf_counter()
+        content = await file.read()
+        # Server-side receive of multipart body (client measures upload independently).
+        turn.set_ms("audio_receive_ms", (time.perf_counter() - read_t0) * 1000.0)
+        turn.set_value("audio_bytes", len(content))
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Audio file too large (max 25MB).")
         try:
-            state = await InterviewLangGraphAgent(db).get_session_state(candidate.candidate_id)
-            current_question = (state or {}).get("CurrentQuestion") or {}
-            if not isinstance(current_question, dict):
-                current_question = {}
+            result = await service.transcribe_answer(
+                candidate.candidate_id,
+                content=content,
+                filename=file.filename or "audio.webm",
+                question_id=(question_id or "").strip() or None,
+                partial=partial,
+                prior_text=(prior_text or "").strip() or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail="Speech recognition timed out. Please try answering again.",
+            ) from None
+        except RuntimeError as exc:
+            detail = str(exc) or "We could not hear your answer clearly. Please speak again after the question."
+            # Never leak provider/SDK names to the candidate UI.
+            lowered = detail.lower()
+            if any(token in lowered for token in ("azure", "whisper", "openai", "groq", "cognitiveservices", "stt")):
+                detail = "We could not hear your answer clearly. Please speak again after the question."
+            raise HTTPException(status_code=503, detail=detail) from None
         except Exception:
-            current_question = {}
-        qid = (question_id or "").strip() or str(current_question.get("id") or "").strip()
-        audio_path = save_answer_audio(
-            candidate.candidate_id,
-            qid or None,
-            content,
-            file.filename or "answer.webm",
-        )
-        upsert_oral_turn(
-            candidate,
-            {
-                "question_id": qid,
-                "question_text": str(current_question.get("question_text") or ""),
-                "answer_text": str(getattr(result, "text", "") or ""),
-                "audio_path": audio_path,
-            },
-        )
-        await db.commit()
-    return result
+            logger.exception("Transcription failed for in-app room %s", candidate.candidate_id)
+            raise HTTPException(
+                status_code=500,
+                detail="We could not hear your answer clearly. Please speak again after the question.",
+            ) from None
+
+        if not partial:
+            from services.interview_oral_store import save_answer_audio, upsert_oral_turn
+
+            current_question: dict = {}
+            try:
+                state = await InterviewLangGraphAgent(db).get_session_state(candidate.candidate_id)
+                current_question = (state or {}).get("CurrentQuestion") or {}
+                if not isinstance(current_question, dict):
+                    current_question = {}
+            except Exception:
+                current_question = {}
+            qid = (question_id or "").strip() or str(current_question.get("id") or "").strip()
+            save_t0 = time.perf_counter()
+            audio_path = save_answer_audio(
+                candidate.candidate_id,
+                qid or None,
+                content,
+                file.filename or "answer.webm",
+            )
+            upsert_oral_turn(
+                candidate,
+                {
+                    "question_id": qid,
+                    "question_text": str(current_question.get("question_text") or ""),
+                    "answer_text": str(getattr(result, "text", "") or ""),
+                    "raw_transcript": str(getattr(result, "raw_text", None) or getattr(result, "text", "") or ""),
+                    "corrected_transcript": str(getattr(result, "text", "") or ""),
+                    "correction_status": str(getattr(result, "correction_status", None) or "") or None,
+                    "correction_tier": str(getattr(result, "correction_tier", None) or "") or None,
+                    "audio_path": audio_path,
+                },
+            )
+            await db.commit()
+            turn.set_ms("database_save_ms", (time.perf_counter() - save_t0) * 1000.0)
+            turn.mark("transcript_saved")
+        else:
+            turn.mark_unavailable("database_save_ms")
+        _apply_latency_headers(response, turn)
+        return result
 
 
 @router.post("/sessions/{session_id}/ai/speak")
@@ -420,7 +498,9 @@ async def speak_room_text(
     payload: SpeakRequest,
     db: AsyncSession = Depends(get_db),
     authorization: str | None = Header(default=None),
-) -> Response:
+    x_interview_turn_id: str | None = Header(default=None, alias=HEADER_TURN_ID),
+    x_interview_tts_role: str | None = Header(default=None, alias="X-Interview-Tts-Role"),
+) -> FastAPIResponse:
     _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
     service = InterviewAgentService(db)
     text = (payload.text or "").strip() or None
@@ -428,29 +508,183 @@ async def speak_room_text(
     voice = (payload.voice or "female").strip() or "female"
     if not text and not question_id:
         raise HTTPException(status_code=400, detail="Provide question_id or text to speak.")
-    try:
-        result = await service.speak(
-            candidate.candidate_id,
-            text=text,
-            question_id=question_id,
-            voice=voice,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception:
-        logger.exception("TTS failed for in-app room %s", candidate.candidate_id)
-        raise HTTPException(status_code=500, detail="Speech synthesis failed.") from exc
-    return Response(
-        content=result["audio_bytes"],
-        media_type=result.get("content_type") or "audio/wav",
-        headers={
+    tts_role = (x_interview_tts_role or "question").strip().lower()
+    metric_key = "acknowledgement_tts_ms" if tts_role == "ack" else "question_tts_ms"
+    with latency_turn(
+        turn_id=x_interview_turn_id,
+        session_id=session_id,
+        phase=f"speak_{tts_role}",
+    ) as turn:
+        turn.mark("tts_request_start")
+        api_t0 = time.perf_counter()
+        try:
+            result = await service.speak(
+                candidate.candidate_id,
+                text=text,
+                question_id=question_id,
+                voice=voice,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("TTS failed for in-app room %s", candidate.candidate_id)
+            raise HTTPException(status_code=500, detail="Speech synthesis failed.") from exc
+        turn.set_ms(metric_key, (time.perf_counter() - api_t0) * 1000.0)
+        turn.mark("tts_request_end")
+        from services.interview_speed_cache import tts_cache_stats
+
+        stats = tts_cache_stats()
+        headers = {
             "X-TTS-Provider": str(result.get("provider") or ""),
             "X-TTS-Model": str(result.get("model") or ""),
             "X-TTS-Cached": "1" if result.get("cached") else "0",
-        },
+            "X-TTS-Cache-Hit-Ratio": "" if stats.get("hit_ratio") is None else str(stats["hit_ratio"]),
+            **turn.response_headers(),
+        }
+        return FastAPIResponse(
+            content=result["audio_bytes"],
+            media_type=result.get("content_type") or "audio/wav",
+            headers=headers,
+        )
+
+
+@router.post("/sessions/{session_id}/ai/speak-stream")
+async def speak_room_text_stream(
+    session_id: str,
+    payload: SpeakRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    x_interview_turn_id: str | None = Header(default=None, alias=HEADER_TURN_ID),
+):
+    """Stream Azure TTS MP3 chunks; falls back to 409 when streaming is unavailable.
+
+    Clients should fall back to POST /ai/speak (batch blob) on non-200.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from agents.interview_agent.streaming_tts import (
+        STREAM_FORMAT,
+        stream_metrics_headers,
+        streaming_tts_available,
+        synthesize_azure_mp3_stream,
     )
+    from agents.interview_agent.tts_cache_keys import tts_stream_enabled
+
+    _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
+    text = (payload.text or "").strip() or None
+    question_id = (payload.question_id or "").strip() or None
+    voice = (payload.voice or "female").strip() or "female"
+    if not text and not question_id:
+        raise HTTPException(status_code=400, detail="Provide question_id or text to speak.")
+
+    # Prefer cached complete audio when available (no need to stream a fresh synth).
+    # Only peek cache for question_id-only requests — combined utterances are unique per turn.
+    service = InterviewAgentService(db)
+    if question_id and not text:
+        try:
+            cached = await service.tts_cache.get_cached_audio(
+                candidate_id=candidate.candidate_id,
+                question_id=question_id,
+                text=None,
+            )
+            if cached and cached.get("audio_bytes"):
+                return FastAPIResponse(
+                    content=cached["audio_bytes"],
+                    media_type=cached.get("content_type") or "audio/wav",
+                    headers={
+                        "X-TTS-Cached": "1",
+                        "X-TTS-Stream": "0",
+                        "X-TTS-Provider": str(cached.get("provider") or ""),
+                        HEADER_TURN_ID: (x_interview_turn_id or ""),
+                    },
+                )
+        except Exception:
+            logger.debug("TTS cache peek failed", exc_info=True)
+
+    if not tts_stream_enabled() or not streaming_tts_available():
+        raise HTTPException(status_code=409, detail="Streaming TTS unavailable; use /ai/speak.")
+
+    speak_text = text
+    if not speak_text and question_id:
+        qs = await service.questions_repo.get_latest(candidate.candidate_id)
+        if qs:
+            for item in qs.questions_json or []:
+                if item.get("id") == question_id:
+                    speak_text = str(item.get("question_text") or "").strip() or None
+                    break
+    if not speak_text:
+        raise HTTPException(status_code=404, detail="No text available to speak.")
+
+    def _iter():
+        yield from synthesize_azure_mp3_stream(speak_text, voice=voice)
+
+    headers = stream_metrics_headers(
+        {
+            "X-Interview-Turn-Id": x_interview_turn_id or "",
+            "X-TTS-Cached": "0",
+            "X-TTS-Provider": "azure_speech_tts_stream",
+        }
+    )
+    return StreamingResponse(_iter(), media_type=STREAM_FORMAT, headers=headers)
+
+
+@router.post("/sessions/{session_id}/ai/answer-audio")
+async def save_room_answer_audio(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(default=None),
+    file: UploadFile = File(...),
+    question_id: str | None = Form(default=None),
+):
+    """Audit/proctoring recording only — does not run STT (streaming path uses this)."""
+    _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
+    content = await file.read()
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio file too large (max 25MB).")
+    from services.interview_oral_store import save_answer_audio, upsert_oral_turn
+
+    qid = (question_id or "").strip()
+    path = save_answer_audio(
+        candidate.candidate_id,
+        qid or None,
+        content,
+        file.filename or "answer.webm",
+    )
+    if qid or path:
+        upsert_oral_turn(
+            candidate,
+            {
+                "question_id": qid,
+                "audio_path": path,
+                "stt_mode": "streaming",
+            },
+        )
+        await db.commit()
+    return {"ok": True, "audio_path": path}
+
+
+@router.post("/sessions/{session_id}/ai/latency-beacon")
+async def latency_beacon(
+    session_id: str,
+    payload: LatencyBeaconRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: str | None = Header(default=None),
+):
+    """Accept browser-side monotonic timings and emit a correlated structured log."""
+    await _authorized_candidate(session_id, db, authorization)
+    turn = LatencyTurn(
+        turn_id=payload.turn_id,
+        session_id=payload.session_id or session_id,
+        phase=payload.phase or "client_beacon",
+    )
+    turn.merge_client_spans(payload.spans)
+    for event in payload.events[:64]:
+        if isinstance(event, str) and event:
+            turn.events.append(event[:80])
+    turn.emit()
+    return {"ok": True, "turn_id": turn.turn_id}
 
 
 @router.post("/sessions/{session_id}/leave")

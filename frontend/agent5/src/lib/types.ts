@@ -75,6 +75,8 @@ export interface AiInterviewSessionResponse {
   duration_extended?: boolean
   interview_phase?: string | null
   turn_ack?: string | null
+  spoken_prompt?: string | null
+  tts_combine_ack?: boolean
 }
 
 export interface McqOption {

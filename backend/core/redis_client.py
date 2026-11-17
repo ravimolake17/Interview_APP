@@ -43,11 +43,29 @@ def get_redis():
         try:
             import redis
 
-            client = redis.Redis.from_url(url, decode_responses=False)
+            max_conn = 32
+            try:
+                from core.config import get_settings
+
+                max_conn = max(4, int(getattr(get_settings(), "redis_max_connections", 32) or 32))
+            except Exception:
+                max_conn = 32
+            client = redis.Redis.from_url(
+                url,
+                decode_responses=False,
+                max_connections=max_conn,
+                socket_connect_timeout=2.0,
+                socket_timeout=5.0,
+                health_check_interval=30,
+            )
             client.ping()
             _client = client
             _using_memory = False
-            logger.info("Redis connected (%s)", url.split("@")[-1])
+            logger.info(
+                "Redis connected (%s, max_connections=%s)",
+                url.split("@")[-1],
+                max_conn,
+            )
             return _client
         except Exception:
             logger.warning("Redis unavailable — using in-process memory cache/queue", exc_info=True)
@@ -130,6 +148,38 @@ def cache_delete(key: str) -> None:
         _mem_delete(key)
 
 
+def cache_set_nx(key: str, value: Any, *, ttl_seconds: int = 86_400) -> bool:
+    """Set key only if missing. Returns True when this caller claimed the key."""
+    payload = value if isinstance(value, (bytes, bytearray)) else json.dumps(value, default=str).encode("utf-8")
+    client = get_redis()
+    if client is None:
+        with _memory_lock:
+            existing = _memory.get(key)
+            if existing:
+                _val, expires = existing
+                if expires is None or time.time() < expires:
+                    return False
+            raw = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+            expires = time.time() + ttl_seconds if ttl_seconds else None
+            _memory[key] = (raw, expires)
+            return True
+    try:
+        ok = client.set(key, bytes(payload), nx=True, ex=int(ttl_seconds))
+        return bool(ok)
+    except Exception:
+        logger.debug("Redis SET NX failed for %s; memory fallback", key, exc_info=True)
+        with _memory_lock:
+            existing = _memory.get(key)
+            if existing:
+                _val, expires = existing
+                if expires is None or time.time() < expires:
+                    return False
+            raw = payload.decode("utf-8") if isinstance(payload, (bytes, bytearray)) else str(payload)
+            expires = time.time() + ttl_seconds if ttl_seconds else None
+            _memory[key] = (raw, expires)
+            return True
+
+
 def queue_push(queue_key: str, value: Any) -> None:
     payload = json.dumps(value, default=str).encode("utf-8")
     client = get_redis()
@@ -192,3 +242,24 @@ def queue_pop_nowait(queue_key: str) -> Any | None:
         return json.loads(payload.decode("utf-8"))
     except Exception:
         return None
+
+
+def queue_length(queue_key: str) -> int:
+    client = get_redis()
+    if client is None:
+        items = cache_get_json(queue_key) or []
+        return len(items) if isinstance(items, list) else 0
+    try:
+        return int(client.llen(queue_key) or 0)
+    except Exception:
+        items = cache_get_json(queue_key) or []
+        return len(items) if isinstance(items, list) else 0
+
+
+def queue_move(source_key: str, dest_key: str, value: Any) -> None:
+    """Best-effort move: push to dest then (when Redis) leave source as-is.
+
+    Callers should already have popped from source. This helper only records
+    the destination payload (DLQ / processing audit).
+    """
+    queue_push(dest_key, value)

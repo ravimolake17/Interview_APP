@@ -5,7 +5,17 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from core.redis_client import cache_delete, cache_get_bytes, cache_get_json, cache_set, queue_pop_nowait, queue_push
+import hashlib
+
+from core.redis_client import (
+    cache_delete,
+    cache_get_bytes,
+    cache_get_json,
+    cache_set,
+    cache_set_nx,
+    queue_pop_nowait,
+    queue_push,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +27,9 @@ def _qkey(candidate_id: str) -> str:
     return f"interview:questions:{candidate_id}"
 
 
-def _tts_key(candidate_id: str, question_id: str) -> str:
-    return f"interview:tts:{candidate_id}:{question_id}"
+def _tts_key(candidate_id: str, question_id: str, voice: str | None = None) -> str:
+    voice_part = (voice or "female").strip().lower() or "female"
+    return f"interview:tts:{candidate_id}:{question_id}:{voice_part}"
 
 
 def _pending_fu_key(candidate_id: str) -> str:
@@ -58,14 +69,71 @@ def get_cached_question_bank(candidate_id: str) -> list[dict[str, Any]] | None:
     return rows if isinstance(rows, list) else None
 
 
-def cache_tts_audio(candidate_id: str, question_id: str, audio_bytes: bytes) -> None:
+def cache_tts_audio(
+    candidate_id: str,
+    question_id: str,
+    audio_bytes: bytes,
+    *,
+    voice: str | None = "female",
+    content_type: str | None = None,
+    text_hash: str | None = None,
+) -> None:
     if not audio_bytes or not question_id:
         return
-    cache_set(_tts_key(candidate_id, question_id), audio_bytes, ttl_seconds=TTL)
+    cache_set(_tts_key(candidate_id, question_id, voice), audio_bytes, ttl_seconds=TTL)
+    # Legacy key without voice (older readers).
+    cache_set(f"interview:tts:{candidate_id}:{question_id}", audio_bytes, ttl_seconds=TTL)
+    meta = {
+        "voice": (voice or "female").strip().lower() or "female",
+        "content_type": content_type or "audio/wav",
+        "text_hash": text_hash,
+        "byte_size": len(audio_bytes),
+    }
+    cache_set(f"{_tts_key(candidate_id, question_id, voice)}:meta", meta, ttl_seconds=TTL)
+    _record_tts_cache_event(hit=False)
 
 
-def get_cached_tts_audio(candidate_id: str, question_id: str) -> bytes | None:
-    return cache_get_bytes(_tts_key(candidate_id, question_id))
+def get_cached_tts_audio(candidate_id: str, question_id: str, voice: str | None = "female") -> bytes | None:
+    data = cache_get_bytes(_tts_key(candidate_id, question_id, voice))
+    if data:
+        _record_tts_cache_event(hit=True)
+        return data
+    # Backward-compatible lookup.
+    legacy = cache_get_bytes(f"interview:tts:{candidate_id}:{question_id}")
+    if legacy:
+        _record_tts_cache_event(hit=True)
+    return legacy
+
+
+def get_cached_tts_meta(candidate_id: str, question_id: str, voice: str | None = "female") -> dict | None:
+    data = cache_get_json(f"{_tts_key(candidate_id, question_id, voice)}:meta")
+    return data if isinstance(data, dict) else None
+
+
+def _record_tts_cache_event(*, hit: bool) -> None:
+    key = "interview:tts:stats"
+    stats = cache_get_json(key)
+    if not isinstance(stats, dict):
+        stats = {"hits": 0, "misses": 0}
+    if hit:
+        stats["hits"] = int(stats.get("hits") or 0) + 1
+    else:
+        stats["misses"] = int(stats.get("misses") or 0) + 1
+    cache_set(key, stats, ttl_seconds=TTL)
+
+
+def tts_cache_stats() -> dict[str, Any]:
+    stats = cache_get_json("interview:tts:stats")
+    if not isinstance(stats, dict):
+        return {"hits": 0, "misses": 0, "hit_ratio": None}
+    hits = int(stats.get("hits") or 0)
+    misses = int(stats.get("misses") or 0)
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "hit_ratio": round(hits / total, 4) if total else None,
+    }
 
 
 def clear_candidate_speed_cache(candidate_id: str) -> None:
@@ -172,5 +240,45 @@ def pop_pending_followup(candidate_id: str) -> dict[str, Any] | None:
     return None
 
 
+def clear_pending_followups(candidate_id: str) -> int:
+    """Drop any mid-interview adaptive follow-ups still queued for this candidate."""
+    cleared = 0
+    while True:
+        item = queue_pop_nowait(_pending_fu_key(candidate_id))
+        if not isinstance(item, dict):
+            break
+        cleared += 1
+    return cleared
+
+
 def enqueue_eval_job(job: dict[str, Any]) -> None:
     queue_push(EVAL_QUEUE, job)
+
+
+def _pending_stt_key(candidate_id: str, question_id: str) -> str:
+    return f"interview:stt_pending:{candidate_id}:{question_id}"
+
+
+def store_pending_stt_correction(candidate_id: str, question_id: str, payload: dict[str, Any]) -> None:
+    if not candidate_id or not question_id or not isinstance(payload, dict):
+        return
+    cache_set(_pending_stt_key(candidate_id, question_id), payload, ttl_seconds=TTL)
+
+
+def get_pending_stt_correction(candidate_id: str, question_id: str) -> dict[str, Any] | None:
+    data = cache_get_json(_pending_stt_key(candidate_id, question_id))
+    return data if isinstance(data, dict) else None
+
+
+def clear_pending_stt_correction(candidate_id: str, question_id: str) -> None:
+    if candidate_id and question_id:
+        cache_delete(_pending_stt_key(candidate_id, question_id))
+
+
+def claim_eval_job(candidate_id: str, question_id: str, answer_text: str) -> bool:
+    """Prevent duplicate Agent 6 jobs for the same turn answer. True = claimed."""
+    digest = hashlib.sha256(
+        f"{candidate_id}|{question_id}|{(answer_text or '').strip()}".encode("utf-8")
+    ).hexdigest()[:24]
+    key = f"interview:eval:claim:{candidate_id}:{question_id}:{digest}"
+    return cache_set_nx(key, {"claimed": True}, ttl_seconds=TTL)

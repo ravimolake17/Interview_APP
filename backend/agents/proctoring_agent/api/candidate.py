@@ -503,7 +503,9 @@ async def voice_enroll(
     if combined_passed and speaker_result.vector is not None:
         _replace_baseline(db, session.id, "voice", speaker_result.vector, speaker_engine.mode, measurements)
         session.voice_enrolled = True
-        session.status = "voice_enrolled"
+        # Same successful capture enrolls the voiceprint and satisfies the start gate.
+        session.initial_voice_verified = True
+        session.status = "ready"
     db.commit()
     return {"passed": combined_passed, "label": label, "confidence": speaker_result.confidence, "measurements": measurements, "engine": speaker_engine.mode, "sentence_verification": sentence, "speaker_verification": measurements["speaker_verification"]}
 
@@ -571,6 +573,9 @@ def start_interview(
             missing.append("device_checks")
         if not session.face_enrolled or not session.initial_face_verified:
             missing.append("face_enrollment_and_verification")
+        # Successful enroll stores the voiceprint; treat that as verified for start.
+        if session.voice_enrolled and not session.initial_voice_verified:
+            session.initial_voice_verified = True
         if not session.voice_enrolled or not session.initial_voice_verified:
             missing.append("voice_enrollment_and_verification")
         model_details = _mandatory_model_readiness()

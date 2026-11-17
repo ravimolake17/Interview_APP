@@ -60,6 +60,11 @@ class Settings(BaseModel):
     retention_days: int = 30
     test_mode: bool = False
     anti_spoof_live_class: int = 0
+    # Softer than previous defaults: fewer false spoof flags on normal webcam video.
+    anti_spoof_live_threshold: float = 0.58
+    anti_spoof_event_min_confidence: float = 0.85
+    anti_spoof_confirm_seconds: float = 4.0
+    anti_spoof_confirm_count: int = 4
     no_face_confirm_seconds: float = 2.0
     no_face_confirm_count: int = 3
     multiple_faces_confirm_seconds: float = 1.2
@@ -67,20 +72,21 @@ class Settings(BaseModel):
     face_mismatch_confirm_seconds: float = 2.0
     face_mismatch_confirm_count: int = 3
     face_mismatch_min_confidence: float = 0.55
-    gaze_confirm_seconds: float = 2.5
-    gaze_confirm_count: int = 3
-    gaze_min_confidence: float = 0.28
-    head_pose_min_confidence: float = 0.30
-    attention_yaw_enter_degrees: float = 16.0
-    attention_pitch_enter_degrees: float = 13.0
-    attention_roll_enter_degrees: float = 16.0
-    attention_gaze_horizontal_offset: float = 0.075
-    attention_gaze_vertical_offset: float = 0.09
-    attention_hysteresis_ratio: float = 0.72
+    # Slightly softer gaze/attention: allow natural head movement before flagging.
+    gaze_confirm_seconds: float = 3.5
+    gaze_confirm_count: int = 4
+    gaze_min_confidence: float = 0.34
+    head_pose_min_confidence: float = 0.36
+    attention_yaw_enter_degrees: float = 20.0
+    attention_pitch_enter_degrees: float = 17.0
+    attention_roll_enter_degrees: float = 20.0
+    attention_gaze_horizontal_offset: float = 0.10
+    attention_gaze_vertical_offset: float = 0.12
+    attention_hysteresis_ratio: float = 0.68
     attention_blink_ear_threshold: float = 0.115
-    head_pose_confirm_seconds: float = 2.2
-    head_pose_confirm_count: int = 3
-    attention_recovery_seconds: float = 1.2
+    head_pose_confirm_seconds: float = 3.2
+    head_pose_confirm_count: int = 4
+    attention_recovery_seconds: float = 1.6
     attention_frame_interval_ms: int = 750
     attention_baseline_min_samples: int = 10
     attention_baseline_window_samples: int = 18
@@ -104,7 +110,7 @@ class Settings(BaseModel):
     additional_speaker_confirm_count: int = 2
     overlap_confirm_seconds: float = 4.0
     overlap_confirm_count: int = 2
-    sentence_min_completion: float = 1.0
+    sentence_min_completion: float = 0.9
     sentence_max_skipped: int = 1
     sentence_max_incorrect: int = 1
     frame_request_timeout_seconds: float = 8.0
@@ -116,10 +122,10 @@ class Settings(BaseModel):
             "face_mismatch": float(os.getenv("AGENT5_COOLDOWN_FACE_MISMATCH", "10")),
             "no_face": float(os.getenv("AGENT5_COOLDOWN_NO_FACE", "8")),
             "multiple_faces": float(os.getenv("AGENT5_COOLDOWN_MULTIPLE_FACES", "8")),
-            "face_spoof_concern": float(os.getenv("AGENT5_COOLDOWN_FACE_SPOOF", "15")),
-            "gaze_violation": float(os.getenv("AGENT5_COOLDOWN_GAZE", "8")),
-            "head_pose_violation": float(os.getenv("AGENT5_COOLDOWN_HEAD_POSE", "8")),
-            "attention_look_away": float(os.getenv("AGENT5_COOLDOWN_ATTENTION", "8")),
+            "face_spoof_concern": float(os.getenv("AGENT5_COOLDOWN_FACE_SPOOF", "20")),
+            "gaze_violation": float(os.getenv("AGENT5_COOLDOWN_GAZE", "12")),
+            "head_pose_violation": float(os.getenv("AGENT5_COOLDOWN_HEAD_POSE", "12")),
+            "attention_look_away": float(os.getenv("AGENT5_COOLDOWN_ATTENTION", "12")),
             "voice_mismatch": float(os.getenv("AGENT5_COOLDOWN_VOICE_MISMATCH", "12")),
             "possible_additional_speaker": float(os.getenv("AGENT5_COOLDOWN_ADDITIONAL_SPEAKER", "12")),
             "background_conversation": float(os.getenv("AGENT5_COOLDOWN_BACKGROUND_CONVERSATION", "12")),
@@ -201,6 +207,9 @@ class Settings(BaseModel):
         between("AGENT5_HEAD_POSE_MIN_CONFIDENCE", self.head_pose_min_confidence, 0.0, 1.0)
         between("AGENT5_FACE_MISMATCH_MIN_CONFIDENCE", self.face_mismatch_min_confidence, 0.0, 1.0)
         between("AGENT5_VOICE_MISMATCH_MIN_CONFIDENCE", self.voice_mismatch_min_confidence, 0.0, 1.0)
+        between("AGENT5_ANTI_SPOOF_LIVE_THRESHOLD", self.anti_spoof_live_threshold, 0.0, 1.0)
+        between("AGENT5_ANTI_SPOOF_EVENT_MIN_CONFIDENCE", self.anti_spoof_event_min_confidence, 0.0, 1.0)
+        positive("AGENT5_ANTI_SPOOF_CONFIRM_SECONDS", self.anti_spoof_confirm_seconds)
         between("AGENT5_ATTENTION_HYSTERESIS_RATIO", self.attention_hysteresis_ratio, 0.1, 0.99)
         between("AGENT5_ATTENTION_BASELINE_FALLBACK_RISK_SCALE", self.attention_baseline_fallback_risk_scale, 0.0, 1.0)
         positive("AGENT5_ATTENTION_FRAME_INTERVAL_MS", self.attention_frame_interval_ms)
@@ -219,6 +228,7 @@ class Settings(BaseModel):
             ("AGENT5_FACE_MISMATCH_CONFIRM_COUNT", self.face_mismatch_confirm_count),
             ("AGENT5_GAZE_CONFIRM_COUNT", self.gaze_confirm_count),
             ("AGENT5_HEAD_POSE_CONFIRM_COUNT", self.head_pose_confirm_count),
+            ("AGENT5_ANTI_SPOOF_CONFIRM_COUNT", self.anti_spoof_confirm_count),
             ("AGENT5_VOICE_MISMATCH_CONFIRM_COUNT", self.voice_mismatch_confirm_count),
         ):
             if int(count) < 1:
@@ -270,6 +280,10 @@ def get_settings() -> Settings:
         retention_days=int(os.getenv("AGENT5_RETENTION_DAYS", "30")),
         test_mode=os.getenv("AGENT5_TEST_MODE", "0").lower() in {"1", "true", "yes"},
         anti_spoof_live_class=int(os.getenv("AGENT5_ANTI_SPOOF_LIVE_CLASS", "0")),
+        anti_spoof_live_threshold=float(os.getenv("AGENT5_ANTI_SPOOF_LIVE_THRESHOLD", "0.58")),
+        anti_spoof_event_min_confidence=float(os.getenv("AGENT5_ANTI_SPOOF_EVENT_MIN_CONFIDENCE", "0.85")),
+        anti_spoof_confirm_seconds=float(os.getenv("AGENT5_ANTI_SPOOF_CONFIRM_SECONDS", "4.0")),
+        anti_spoof_confirm_count=int(os.getenv("AGENT5_ANTI_SPOOF_CONFIRM_COUNT", "4")),
         no_face_confirm_seconds=float(os.getenv("AGENT5_NO_FACE_CONFIRM_SECONDS", "2.0")),
         no_face_confirm_count=int(os.getenv("AGENT5_NO_FACE_CONFIRM_COUNT", "3")),
         multiple_faces_confirm_seconds=float(os.getenv("AGENT5_MULTIPLE_FACES_CONFIRM_SECONDS", "1.2")),
@@ -277,20 +291,20 @@ def get_settings() -> Settings:
         face_mismatch_confirm_seconds=float(os.getenv("AGENT5_FACE_MISMATCH_CONFIRM_SECONDS", "2.0")),
         face_mismatch_confirm_count=int(os.getenv("AGENT5_FACE_MISMATCH_CONFIRM_COUNT", "3")),
         face_mismatch_min_confidence=float(os.getenv("AGENT5_FACE_MISMATCH_MIN_CONFIDENCE", "0.55")),
-        gaze_confirm_seconds=float(os.getenv("AGENT5_GAZE_CONFIRM_SECONDS", "2.5")),
-        gaze_confirm_count=int(os.getenv("AGENT5_GAZE_CONFIRM_COUNT", "3")),
-        gaze_min_confidence=float(os.getenv("AGENT5_GAZE_MIN_CONFIDENCE", "0.28")),
-        head_pose_min_confidence=float(os.getenv("AGENT5_HEAD_POSE_MIN_CONFIDENCE", "0.30")),
-        attention_yaw_enter_degrees=float(os.getenv("AGENT5_ATTENTION_YAW_ENTER_DEGREES", "16.0")),
-        attention_pitch_enter_degrees=float(os.getenv("AGENT5_ATTENTION_PITCH_ENTER_DEGREES", "13.0")),
-        attention_roll_enter_degrees=float(os.getenv("AGENT5_ATTENTION_ROLL_ENTER_DEGREES", "16.0")),
-        attention_gaze_horizontal_offset=float(os.getenv("AGENT5_ATTENTION_GAZE_HORIZONTAL_OFFSET", "0.075")),
-        attention_gaze_vertical_offset=float(os.getenv("AGENT5_ATTENTION_GAZE_VERTICAL_OFFSET", "0.09")),
-        attention_hysteresis_ratio=float(os.getenv("AGENT5_ATTENTION_HYSTERESIS_RATIO", "0.72")),
+        gaze_confirm_seconds=float(os.getenv("AGENT5_GAZE_CONFIRM_SECONDS", "3.5")),
+        gaze_confirm_count=int(os.getenv("AGENT5_GAZE_CONFIRM_COUNT", "4")),
+        gaze_min_confidence=float(os.getenv("AGENT5_GAZE_MIN_CONFIDENCE", "0.34")),
+        head_pose_min_confidence=float(os.getenv("AGENT5_HEAD_POSE_MIN_CONFIDENCE", "0.36")),
+        attention_yaw_enter_degrees=float(os.getenv("AGENT5_ATTENTION_YAW_ENTER_DEGREES", "20.0")),
+        attention_pitch_enter_degrees=float(os.getenv("AGENT5_ATTENTION_PITCH_ENTER_DEGREES", "17.0")),
+        attention_roll_enter_degrees=float(os.getenv("AGENT5_ATTENTION_ROLL_ENTER_DEGREES", "20.0")),
+        attention_gaze_horizontal_offset=float(os.getenv("AGENT5_ATTENTION_GAZE_HORIZONTAL_OFFSET", "0.10")),
+        attention_gaze_vertical_offset=float(os.getenv("AGENT5_ATTENTION_GAZE_VERTICAL_OFFSET", "0.12")),
+        attention_hysteresis_ratio=float(os.getenv("AGENT5_ATTENTION_HYSTERESIS_RATIO", "0.68")),
         attention_blink_ear_threshold=float(os.getenv("AGENT5_ATTENTION_BLINK_EAR_THRESHOLD", "0.115")),
-        head_pose_confirm_seconds=float(os.getenv("AGENT5_HEAD_POSE_CONFIRM_SECONDS", "2.2")),
-        head_pose_confirm_count=int(os.getenv("AGENT5_HEAD_POSE_CONFIRM_COUNT", "3")),
-        attention_recovery_seconds=float(os.getenv("AGENT5_ATTENTION_RECOVERY_SECONDS", "1.2")),
+        head_pose_confirm_seconds=float(os.getenv("AGENT5_HEAD_POSE_CONFIRM_SECONDS", "3.2")),
+        head_pose_confirm_count=int(os.getenv("AGENT5_HEAD_POSE_CONFIRM_COUNT", "4")),
+        attention_recovery_seconds=float(os.getenv("AGENT5_ATTENTION_RECOVERY_SECONDS", "1.6")),
         attention_frame_interval_ms=int(os.getenv("AGENT5_ATTENTION_FRAME_INTERVAL_MS", "750")),
         attention_baseline_min_samples=int(os.getenv("AGENT5_ATTENTION_BASELINE_MIN_SAMPLES", "10")),
         attention_baseline_window_samples=int(os.getenv("AGENT5_ATTENTION_BASELINE_WINDOW_SAMPLES", "18")),
@@ -314,7 +328,7 @@ def get_settings() -> Settings:
         additional_speaker_confirm_count=int(os.getenv("AGENT5_ADDITIONAL_SPEAKER_CONFIRM_COUNT", "2")),
         overlap_confirm_seconds=float(os.getenv("AGENT5_OVERLAP_CONFIRM_SECONDS", "4.0")),
         overlap_confirm_count=int(os.getenv("AGENT5_OVERLAP_CONFIRM_COUNT", "2")),
-        sentence_min_completion=float(os.getenv("AGENT5_SENTENCE_MIN_COMPLETION", "1.0")),
+        sentence_min_completion=float(os.getenv("AGENT5_SENTENCE_MIN_COMPLETION", "0.9")),
         sentence_max_skipped=int(os.getenv("AGENT5_SENTENCE_MAX_SKIPPED", "1")),
         sentence_max_incorrect=int(os.getenv("AGENT5_SENTENCE_MAX_INCORRECT", "1")),
         frame_request_timeout_seconds=float(os.getenv("AGENT5_FRAME_REQUEST_TIMEOUT_SECONDS", "8.0")),

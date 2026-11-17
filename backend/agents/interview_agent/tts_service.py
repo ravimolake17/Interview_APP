@@ -237,6 +237,9 @@ def synthesize_speech(
 
     chosen_voice = _normalize_voice(voice)
     t0 = time.perf_counter()
+    from agents.shared.latency_trace import record_event, record_ms, record_unavailable, record_value
+
+    record_event("tts_synthesis_start")
     audio_bytes, sample_rate, content_type, provider, model_id, engine = _synthesize_with_fallback(
         cleaned, voice=chosen_voice, model=model
     )
@@ -245,6 +248,14 @@ def synthesize_speech(
         raise RuntimeError("TTS returned empty audio.")
 
     elapsed = time.perf_counter() - t0
+    record_ms("tts_synthesis_ms", elapsed * 1000.0)
+    record_value("tts_audio_bytes", len(audio_bytes))
+    record_value("tts_provider", provider)
+    record_value("tts_engine", engine)
+    record_value("tts_cache_hit", False)
+    # Full-response REST / Edge synthesis — first-audio byte timing is unavailable.
+    record_unavailable("tts_time_to_first_audio_ms")
+    record_event("tts_synthesis_end")
     logger.info(
         "TTS done engine=%s voice=%s seconds=%.2f chars=%s",
         engine,
@@ -355,9 +366,13 @@ def _synthesize_entry(entry, cleaned: str, *, voice: str, model: str):
 
 
 def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes, int, str, str, str, str]:
-    import httpx
+    import time as _time
 
     from agents.screening_agent.config import settings
+    from agents.shared.azure_concurrency import azure_slot
+    from agents.shared.azure_http import get_azure_http_client
+    from agents.shared.azure_retry import call_with_azure_retries
+    from agents.shared.latency_trace import record_ms, record_unavailable, record_value
 
     key = getattr(settings, "AZURE_SPEECH_KEY", None)
     region = (
@@ -378,17 +393,52 @@ def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes,
         f'<voice xml:lang="en-IN" name="{xml_escape(neural)}">{xml_escape(cleaned)}</voice>'
         f"</speak>"
     )
-    response = httpx.post(
-        f"{endpoint}/cognitiveservices/v1",
-        headers={
-            "Ocp-Apim-Subscription-Key": key,
-            "Content-Type": "application/ssml+xml",
-            "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
-            "User-Agent": "InterviewAgenticAI",
-        },
-        content=ssml.encode("utf-8"),
-        timeout=60,
-    )
+    client = get_azure_http_client("speech")
+
+    class _TtsHttpError(RuntimeError):
+        def __init__(self, status_code: int, detail: str, headers: dict | None = None):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    def _once():
+        response = client.post(
+            f"{endpoint}/cognitiveservices/v1",
+            headers={
+                "Ocp-Apim-Subscription-Key": key,
+                "Content-Type": "application/ssml+xml",
+                "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
+                "User-Agent": "InterviewAgenticAI",
+            },
+            content=ssml.encode("utf-8"),
+            timeout=60,
+        )
+        if response.status_code >= 400:
+            raise _TtsHttpError(
+                response.status_code,
+                f"Azure Speech TTS HTTP {response.status_code}",
+                headers=dict(response.headers),
+            )
+        return response
+
+    t0 = _time.perf_counter()
+    with azure_slot("tts"):
+        try:
+            response = call_with_azure_retries(
+                "speech-tts",
+                _once,
+                status_of=lambda exc: getattr(exc, "status_code", None),
+            )
+        except _TtsHttpError as exc:
+            provider_ms = (_time.perf_counter() - t0) * 1000.0
+            record_ms("tts_provider_request_ms", provider_ms)
+            record_value("tts_http_status", int(exc.status_code))
+            record_unavailable("tts_time_to_first_audio_ms")
+            raise
+    provider_ms = (_time.perf_counter() - t0) * 1000.0
+    record_ms("tts_provider_request_ms", provider_ms)
+    record_value("tts_http_status", int(response.status_code))
+    record_unavailable("tts_time_to_first_audio_ms")
     response.raise_for_status()
     if not response.content:
         raise RuntimeError("Azure Speech TTS returned empty audio.")

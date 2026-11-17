@@ -361,6 +361,8 @@ async def transcribe_answer(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc) or "Speech transcription timed out.") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
@@ -457,6 +459,13 @@ def _session_response(candidate_id: str, state: dict) -> InterviewSessionStateRe
         planned_minutes = int(planned) if planned is not None else None
     except (TypeError, ValueError):
         planned_minutes = None
+    from agents.interview_agent.tts_cache_keys import build_combined_utterance, tts_combine_ack_enabled
+
+    turn_ack = str(state.get("TurnAck") or "").strip() or None
+    current_q = state.get("CurrentQuestion") if isinstance(state.get("CurrentQuestion"), dict) else None
+    q_text = str((current_q or {}).get("question_text") or "").strip()
+    combine = tts_combine_ack_enabled()
+    spoken = build_combined_utterance(turn_ack, q_text) if combine and turn_ack and q_text else None
     return InterviewSessionStateResponse(
         candidate_id=candidate_id,
         status=str(state.get("Status") or "UNKNOWN"),
@@ -476,7 +485,9 @@ def _session_response(candidate_id: str, state: dict) -> InterviewSessionStateRe
         elapsed_seconds=elapsed,
         duration_extended=bool(state.get("DurationExtended")),
         interview_phase=str(state.get("InterviewPhase") or "") or None,
-        turn_ack=str(state.get("TurnAck") or "").strip() or None,
+        turn_ack=turn_ack,
+        spoken_prompt=spoken,
+        tts_combine_ack=bool(combine and spoken),
     )
 
 

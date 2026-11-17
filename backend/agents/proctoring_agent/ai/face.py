@@ -283,11 +283,13 @@ class AntiSpoofEngine:
         probs = softmax(output)
         # The selected MiniFASNetV2 export uses a configurable live-class index.
         # The bundled model manifest records index 0 for [live, print, replay].
-        live_index = min(max(get_settings().anti_spoof_live_class, 0), len(probs) - 1)
+        settings = get_settings()
+        live_index = min(max(settings.anti_spoof_live_class, 0), len(probs) - 1)
         live_prob = float(probs[live_index])
+        live_threshold = float(settings.anti_spoof_live_threshold)
         return {
             "available": True,
-            "label": "live" if live_prob >= 0.70 else "spoof_concern",
+            "label": "live" if live_prob >= live_threshold else "spoof_concern",
             "confidence": max(live_prob, 1.0 - live_prob),
             "live_probability": live_prob,
             "class_probabilities": probs.tolist(),

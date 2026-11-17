@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from agents.screening_agent.config import settings
+from agents.shared.latency_trace import get_current_turn, record_ms, record_unavailable
 from agents.shared.model_catalog import (
     describe_target,
     get_runtime_catalog,
@@ -22,6 +24,20 @@ from agents.shared.model_catalog import (
 from schemas.settings import AICatalogEntry
 
 logger = logging.getLogger(__name__)
+
+
+def _record_llm_metrics(payload: dict[str, Any]) -> None:
+    """Attach LLM call metrics to the active interview latency turn (no prompt/content)."""
+    turn = get_current_turn()
+    if turn is None:
+        return
+    for key, value in payload.items():
+        if value is None:
+            turn.mark_unavailable(key)
+        else:
+            turn.set_value(key, value)
+    # Non-streaming completions cannot expose TTFT.
+    record_unavailable("llm_time_to_first_token_ms")
 
 DEFAULT_LLAMA_MODEL = "openai/gpt-oss-120b"
 
@@ -148,6 +164,10 @@ def _call_azure_chat(
 ) -> str:
     import httpx
 
+    from agents.shared.azure_concurrency import azure_slot
+    from agents.shared.azure_http import get_azure_http_client
+    from agents.shared.azure_retry import call_with_azure_retries
+
     catalog = get_runtime_catalog()
     endpoint = normalize_azure_openai_endpoint(
         str(
@@ -184,35 +204,116 @@ def _call_azure_chat(
         payload["max_tokens"] = int(max_tokens)
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
-    response = httpx.post(
-        url,
-        params={"api-version": api_version},
-        headers={"api-key": api_key, "Content-Type": "application/json"},
-        json=payload,
-        timeout=getattr(settings, "GROQ_TIMEOUT_SECONDS", 45),
-    )
-    if response.status_code >= 400:
-        detail = ""
-        try:
-            err_body = response.json()
-            err = err_body.get("error") if isinstance(err_body, dict) else None
-            if isinstance(err, dict):
-                detail = str(err.get("message") or err.get("code") or "").strip()
-            elif isinstance(err_body, dict):
-                detail = str(err_body.get("message") or "").strip()
-        except Exception:
-            detail = (response.text or "").strip()
-        detail = detail[:240] or response.reason_phrase or "bad request"
-        raise RuntimeError(
-            f"Azure OpenAI rejected {deployment} ({response.status_code}): {detail}. "
-            "Use the resource endpoint https://….openai.azure.com/ (not the Foundry project URL), "
-            "deployment name exactly as in Azure, and API version like 2024-10-21 — not the model version."
+    timeout_s = getattr(settings, "GROQ_TIMEOUT_SECONDS", 45)
+    t0 = time.perf_counter()
+    http_status: int | None = None
+    attempt_box = {"n": 0}
+    client = get_azure_http_client("openai")
+
+    class _AzureHttpError(RuntimeError):
+        def __init__(self, status_code: int, detail: str, headers: dict | None = None):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    def _once():
+        nonlocal http_status
+        attempt_box["n"] += 1
+        response = client.post(
+            url,
+            params={"api-version": api_version},
+            headers={"api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout_s,
         )
+        http_status = int(response.status_code)
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                err_body = response.json()
+                err = err_body.get("error") if isinstance(err_body, dict) else None
+                if isinstance(err, dict):
+                    detail = str(err.get("message") or err.get("code") or "").strip()
+                elif isinstance(err_body, dict):
+                    detail = str(err_body.get("message") or "").strip()
+            except Exception:
+                detail = (response.text or "").strip()
+            detail = detail[:240] or response.reason_phrase or "bad request"
+            raise _AzureHttpError(
+                response.status_code,
+                f"Azure OpenAI rejected {deployment} ({response.status_code}): {detail}. "
+                "Use the resource endpoint https://….openai.azure.com/ (not the Foundry project URL), "
+                "deployment name exactly as in Azure, and API version like 2024-10-21 — not the model version.",
+                headers=dict(response.headers),
+            )
+        return response
+
+    try:
+        with azure_slot("llm"):
+            try:
+                response = call_with_azure_retries(
+                    f"openai:{deployment}",
+                    _once,
+                    status_of=lambda exc: getattr(exc, "status_code", None),
+                )
+            except httpx.TimeoutException:
+                record_ms("llm_request_ms", (time.perf_counter() - t0) * 1000.0)
+                _record_llm_metrics(
+                    {
+                        "llm_provider": "azure",
+                        "llm_deployment": deployment,
+                        "llm_http_status": None,
+                        "llm_retry_count": max(0, attempt_box["n"] - 1),
+                        "llm_timeout_seconds": timeout_s,
+                        "llm_prompt_tokens": None,
+                        "llm_completion_tokens": None,
+                        "llm_total_completion_ms": None,
+                    }
+                )
+                raise
+            except _AzureHttpError as exc:
+                duration_ms = (time.perf_counter() - t0) * 1000.0
+                _record_llm_metrics(
+                    {
+                        "llm_provider": "azure",
+                        "llm_deployment": deployment,
+                        "llm_http_status": exc.status_code,
+                        "llm_retry_count": max(0, attempt_box["n"] - 1),
+                        "llm_timeout_seconds": timeout_s,
+                        "llm_request_ms": round(duration_ms, 3),
+                        "llm_prompt_tokens": None,
+                        "llm_completion_tokens": None,
+                        "llm_total_completion_ms": round(duration_ms, 3),
+                    }
+                )
+                raise RuntimeError(str(exc)) from exc
+    except Exception:
+        raise
+    duration_ms = (time.perf_counter() - t0) * 1000.0
     body = response.json()
     content = (
         ((body.get("choices") or [{}])[0].get("message") or {}).get("content")
         if isinstance(body, dict)
         else None
+    )
+    usage = body.get("usage") if isinstance(body, dict) else None
+    prompt_tokens = None
+    completion_tokens = None
+    if isinstance(usage, dict):
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+    _record_llm_metrics(
+        {
+            "llm_provider": "azure",
+            "llm_deployment": deployment,
+            "llm_http_status": http_status,
+            "llm_retry_count": max(0, attempt_box["n"] - 1),
+            "llm_timeout_seconds": timeout_s,
+            "llm_request_ms": round(duration_ms, 3),
+            "llm_prompt_tokens": prompt_tokens,
+            "llm_completion_tokens": completion_tokens,
+            "llm_total_completion_ms": round(duration_ms, 3),
+        }
     )
     if not content:
         raise ValueError("Azure OpenAI returned an empty response.")
@@ -245,6 +346,8 @@ def _call_groq_chat(
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
+    retry_count = 0
+    t0 = time.perf_counter()
     try:
         response = client.chat.completions.create(**kwargs)
     except Exception as exc:
@@ -258,9 +361,41 @@ def _call_groq_chat(
                 DEFAULT_LLAMA_MODEL,
             )
             kwargs["model"] = DEFAULT_LLAMA_MODEL
+            retry_count = 1
             response = client.chat.completions.create(**kwargs)
+            chosen = DEFAULT_LLAMA_MODEL
         else:
+            record_ms("llm_request_ms", (time.perf_counter() - t0) * 1000.0)
+            _record_llm_metrics(
+                {
+                    "llm_provider": "groq",
+                    "llm_deployment": chosen,
+                    "llm_http_status": None,
+                    "llm_retry_count": retry_count,
+                    "llm_timeout_seconds": getattr(settings, "GROQ_TIMEOUT_SECONDS", 45),
+                    "llm_prompt_tokens": None,
+                    "llm_completion_tokens": None,
+                    "llm_total_completion_ms": None,
+                }
+            )
             raise
+    duration_ms = (time.perf_counter() - t0) * 1000.0
+    usage = getattr(response, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None) if usage is not None else None
+    completion_tokens = getattr(usage, "completion_tokens", None) if usage is not None else None
+    _record_llm_metrics(
+        {
+            "llm_provider": "groq",
+            "llm_deployment": chosen,
+            "llm_http_status": 200,
+            "llm_retry_count": retry_count,
+            "llm_timeout_seconds": getattr(settings, "GROQ_TIMEOUT_SECONDS", 45),
+            "llm_request_ms": round(duration_ms, 3),
+            "llm_prompt_tokens": prompt_tokens,
+            "llm_completion_tokens": completion_tokens,
+            "llm_total_completion_ms": round(duration_ms, 3),
+        }
+    )
     content = response.choices[0].message.content
     if not content:
         raise ValueError("Groq returned an empty response.")

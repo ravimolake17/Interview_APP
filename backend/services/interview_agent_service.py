@@ -254,12 +254,19 @@ class InterviewAgentService:
         await self.tts_cache.clear_for_candidate(candidate_id)
 
         questions_json = [q.model_dump(mode="json") for q in questions]
+        # Bake budgeted follow-ups into the fixed bank before the interview.
+        try:
+            from agents.interview_agent.planned_followups import materialize_planned_followups
+
+            questions_json = materialize_planned_followups(questions_json)
+        except Exception:
+            logger.exception("Planned follow-up materialization failed; using base bank")
         row = await self.questions_repo.create(
             candidate_id=candidate_id,
             blueprint_id=blueprint_row.id,
             status="SPEAK_PREPARING",
             candidate_level=blueprint_row.candidate_level,
-            total_questions=len(questions),
+            total_questions=len(questions_json),
             total_duration_minutes=int(duration) if duration is not None else None,
             questions_json=questions_json,
             company_id=candidate.company_id,
@@ -504,7 +511,9 @@ class InterviewAgentService:
         prior_text: str | None = None,
     ):
         from agents.interview_agent.stt_corrector import build_stt_context
+        from agents.interview_agent.stt_executor import run_stt_blocking
         from agents.interview_agent.stt_service import transcribe_audio_bytes
+        from services.interview_speed_cache import store_pending_stt_correction
 
         candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
@@ -527,7 +536,10 @@ class InterviewAgentService:
             question_text=question_text,
         )
 
-        return transcribe_audio_bytes(
+        # Azure Speech REST + deterministic/LLM correction are blocking — keep the
+        # FastAPI event loop free via a bounded STT thread pool.
+        result = await run_stt_blocking(
+            transcribe_audio_bytes,
             content,
             filename=filename,
             whisper_prompt=stt_bundle.get("whisper_prompt"),
@@ -538,6 +550,28 @@ class InterviewAgentService:
             question_text=question_text,
             candidate_name=stt_bundle.get("candidate_name") or candidate.full_name,
         )
+
+        if (
+            not partial
+            and question_id
+            and getattr(result, "needs_llm_correction", False)
+        ):
+            store_pending_stt_correction(
+                candidate_id,
+                question_id,
+                {
+                    "raw_transcript": getattr(result, "raw_text", None) or result.text,
+                    "visible_text": result.text,
+                    "needs_llm_correction": True,
+                    "correction_status": getattr(result, "correction_status", None) or "pending_llm",
+                    "correction_tier": getattr(result, "correction_tier", None),
+                    "resume_terms": list(stt_bundle.get("resume_terms") or [])[:80],
+                    "context": dict(stt_bundle.get("context") or {}),
+                    "question_text": question_text,
+                    "candidate_name": stt_bundle.get("candidate_name") or candidate.full_name,
+                },
+            )
+        return result
 
     async def speak(
         self,
@@ -566,36 +600,112 @@ class InterviewAgentService:
         # Live Q&A / closing prompts are not in the stored question bank.
         skip_question_cache = bool(question_id and str(question_id).startswith("qna-"))
 
-        # Prefer disk/Postgres cache (instant) for bank questions only.
-        if question_id and not skip_question_cache:
-            row = await self.tts_cache.audio_repo.get_ready_for_candidate_question(
-                candidate_id=candidate_id, question_id=question_id
-            )
-            if row:
-                from agents.interview_agent.tts_storage import read_audio_file
-
-                data = read_audio_file(row.file_path)
-                if data:
-                    return {
-                        "audio_bytes": data,
-                        "content_type": row.content_type or "audio/wav",
-                        "provider": row.provider,
-                        "model": row.model,
-                        "voice": row.voice,
-                        "cached": True,
-                        "question_id": row.question_id,
-                    }
-
-        if not text:
-            raise ValueError("No question text or cached audio available to speak.")
-
-        # Live Indic Parler-TTS fallback (slow) — run off the event loop.
         if not voice:
             from agents.shared.model_catalog import ordered_targets, voice_for_entry
 
             targets = ordered_targets("tts")
             if targets:
                 voice = voice_for_entry(targets[0])
+            else:
+                voice = "female"
+
+        # Prefer Redis → disk/Postgres cache when text/voice/format still match.
+        if question_id and not skip_question_cache:
+            from agents.interview_agent.tts_cache_keys import cache_fingerprint
+            from agents.interview_agent.tts_storage import read_audio_file, text_hash
+            from agents.shared.latency_trace import record_event, record_ms, record_value
+            from services.interview_speed_cache import get_cached_tts_audio, get_cached_tts_meta
+
+            hot = get_cached_tts_audio(candidate_id, question_id, voice)
+            meta = get_cached_tts_meta(candidate_id, question_id, voice)
+            if hot and text:
+                expected = cache_fingerprint(text, voice=voice, content_type=str((meta or {}).get("content_type") or "audio/wav"))
+                legacy = text_hash(text)
+                stored = str((meta or {}).get("text_hash") or "")
+                if stored and stored not in {expected, legacy}:
+                    hot = None
+            if hot:
+                record_value("tts_cache_hit", True)
+                record_ms("tts_synthesis_ms", 0.0)
+                record_value("tts_audio_bytes", len(hot))
+                record_value("tts_provider", "redis_cache")
+                record_event("tts_cache_hit")
+                return {
+                    "audio_bytes": hot,
+                    "content_type": str((meta or {}).get("content_type") or "audio/wav"),
+                    "provider": "redis_cache",
+                    "model": "",
+                    "voice": voice,
+                    "cached": True,
+                    "question_id": question_id,
+                }
+
+            row = await self.tts_cache.audio_repo.get_ready_for_candidate_question(
+                candidate_id=candidate_id, question_id=question_id
+            )
+            if row and (not voice or row.voice == voice):
+                if text:
+                    expected = cache_fingerprint(
+                        text, voice=row.voice, content_type=row.content_type or "audio/wav"
+                    )
+                    legacy = text_hash(text)
+                    if row.text_hash not in {expected, legacy}:
+                        row = None
+                if row:
+                    data = read_audio_file(row.file_path)
+                    if data:
+                        try:
+                            from services.interview_speed_cache import cache_tts_audio
+
+                            cache_tts_audio(
+                                candidate_id,
+                                question_id,
+                                data,
+                                voice=row.voice,
+                                content_type=row.content_type,
+                                text_hash=row.text_hash,
+                            )
+                        except Exception:
+                            pass
+                        record_value("tts_cache_hit", True)
+                        record_ms("tts_synthesis_ms", 0.0)
+                        record_value("tts_audio_bytes", len(data))
+                        record_value("tts_provider", row.provider)
+                        record_event("tts_cache_hit")
+                        return {
+                            "audio_bytes": data,
+                            "content_type": row.content_type or "audio/wav",
+                            "provider": row.provider,
+                            "model": row.model,
+                            "voice": row.voice,
+                            "cached": True,
+                            "question_id": row.question_id,
+                        }
+
+        if not text:
+            raise ValueError("No question text or cached audio available to speak.")
+
+        # Live synthesis fallback — run off the event loop.
         result = await asyncio.to_thread(synthesize_speech, text, voice=voice)
         result["cached"] = False
+        # Warm caches for follow-ups / repeated asks.
+        if question_id and not skip_question_cache:
+            try:
+                from agents.interview_agent.tts_cache_keys import cache_fingerprint
+                from services.interview_speed_cache import cache_tts_audio
+
+                cache_tts_audio(
+                    candidate_id,
+                    question_id,
+                    result["audio_bytes"],
+                    voice=str(result.get("voice") or voice),
+                    content_type=str(result.get("content_type") or "audio/wav"),
+                    text_hash=cache_fingerprint(
+                        text,
+                        voice=str(result.get("voice") or voice),
+                        content_type=str(result.get("content_type") or "audio/wav"),
+                    ),
+                )
+            except Exception:
+                pass
         return result

@@ -535,39 +535,51 @@ async def analyze_frame(
             "risk_score": auth_session.risk_score,
             "risk_classification": auth_session.risk_classification,
         }
-    async with _VISUAL_WORKERS:
-        api_started = time.perf_counter()
-        session = require_own_session(auth_session, session_id)
-        if session.status != "active":
-            raise HTTPException(status_code=409, detail="session is not active")
-        settings = get_settings()
+    session = require_own_session(auth_session, session_id)
+    if session.status != "active":
+        raise HTTPException(status_code=409, detail="session is not active")
+    settings = get_settings()
 
-        last_metric = db.scalar(
-            select(DetectorMetric)
-            .where(DetectorMetric.session_id == session.id, DetectorMetric.detector == "visual_pipeline")
-            .order_by(desc(DetectorMetric.sequence_number))
-            .limit(1)
+    last_metric = db.scalar(
+        select(DetectorMetric)
+        .where(DetectorMetric.session_id == session.id, DetectorMetric.detector == "visual_pipeline")
+        .order_by(desc(DetectorMetric.sequence_number))
+        .limit(1)
+    )
+    if last_metric is not None and last_metric.sequence_number is not None and sequence_number <= last_metric.sequence_number:
+        metric = DetectorMetric(
+            session_id=session.id,
+            detector="visual_pipeline",
+            sequence_number=sequence_number,
+            captured_at=captured_at,
+            queue_depth=queue_depth,
+            dropped_stale=dropped_stale + 1,
+            status="stale_frame",
+            details={"last_accepted_sequence": last_metric.sequence_number, "relative_ms": relative_ms},
         )
-        if last_metric is not None and last_metric.sequence_number is not None and sequence_number <= last_metric.sequence_number:
-            metric = DetectorMetric(
-                session_id=session.id,
-                detector="visual_pipeline",
-                sequence_number=sequence_number,
-                captured_at=captured_at,
-                queue_depth=queue_depth,
-                dropped_stale=dropped_stale + 1,
-                status="stale_frame",
-                details={"last_accepted_sequence": last_metric.sequence_number, "relative_ms": relative_ms},
-            )
-            db.add(metric)
-            db.commit()
-            return _technical_face_response(
-                session,
-                status="stale_frame",
-                reason="A newer frame sequence was already processed",
-                sequence_number=sequence_number,
-                captured_at=captured_at,
-            )
+        db.add(metric)
+        db.commit()
+        return _technical_face_response(
+            session,
+            status="stale_frame",
+            reason="A newer frame sequence was already processed",
+            sequence_number=sequence_number,
+            captured_at=captured_at,
+        )
+
+    # Bounded concurrency: drop frames rather than queue behind face inference.
+    try:
+        await asyncio.wait_for(_VISUAL_WORKERS.acquire(), timeout=0.05)
+    except TimeoutError:
+        return _technical_face_response(
+            session,
+            status="stale_frame",
+            reason="Visual workers busy; dropped frame to protect interview latency",
+            sequence_number=sequence_number,
+            captured_at=captured_at,
+        )
+    try:
+        api_started = time.perf_counter()
 
         image_bytes = await read_upload_limited(image, allowed_prefixes=("image/",), kind="image", max_mb=10)
         try:
@@ -846,10 +858,17 @@ async def analyze_frame(
             if result is not None and result.label in {"face_match", "face_mismatch"}:
                 spoof = await _run_cpu(db, session.id, "anti_spoof", settings.frame_request_timeout_seconds, anti_spoof_engine.analyze, frame, faces[0])
                 output["anti_spoof"] = spoof
-                spoof_active = spoof.get("label") == "spoof_concern" and float(spoof.get("confidence", 0)) >= 0.75
+                spoof_active = (
+                    spoof.get("label") == "spoof_concern"
+                    and float(spoof.get("confidence", 0)) >= float(settings.anti_spoof_event_min_confidence)
+                )
                 spoof_confirmed, spoof_duration = confirmation_tracker.update(
-                    session.id, "face_spoof_concern", spoof_active,
-                    required_seconds=2.0, required_count=3, observed_ms=relative_ms,
+                    session.id,
+                    "face_spoof_concern",
+                    spoof_active,
+                    required_seconds=float(settings.anti_spoof_confirm_seconds),
+                    required_count=int(settings.anti_spoof_confirm_count),
+                    observed_ms=relative_ms,
                 )
                 if spoof_confirmed:
                     event, created = await _visual_event(db, session, "face_spoof_concern", float(spoof["confidence"]), "Passive RGB anti-spoofing produced a sustained presentation-attack concern. Human review is required.", relative_ms, spoof, image_bytes, spoof_duration)
@@ -906,6 +925,8 @@ async def analyze_frame(
             },
         })
         return _candidate_stream_response(output, "visual")
+    finally:
+        _VISUAL_WORKERS.release()
 
 
 @router.post("/{session_id}/analyze-audio")

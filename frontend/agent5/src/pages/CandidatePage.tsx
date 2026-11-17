@@ -35,7 +35,10 @@ import { isLiveDictationSupported, startLiveDictation } from '../lib/liveDictati
 import { RoomPeerConnection, type WebRtcSignalPayload } from '../lib/roomWebRtc'
 import { resolveParticipantRole, readCompanyCodeFromToken } from '../lib/sessionRole'
 import { resolveCompanyBrand, setCompanyCode, subscribeCompanyBrand } from '../lib/branding'
+import { createInterviewTurnTrace, turnHeaders, type InterviewTurnTrace } from '../lib/interviewLatency'
 import { playQuestionAudio, playSpokenText, startSilenceMonitor, stopSpokenAudio, type AudioPlayerRef, type SilenceMonitor } from '../lib/interviewSpeech'
+import { fetchSttMode, StreamingSttClient } from '../lib/streamingStt'
+import { TranscriptAccumulator } from '../lib/transcriptAccumulator'
 import type {
   AiInterviewSessionResponse,
   AnalysisResponse,
@@ -107,17 +110,71 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Never show provider/STT internals (Azure/Whisper) to candidates. */
+const NO_SPEECH_TIMEOUT_MS = 10_000
+const NO_ANSWER_RETRY_LIMIT = 1
+/** Answer countdown. At the limit the turn ends at the next pause, or after the grace period. */
+const MAX_ANSWER_MS = 180_000
+const ANSWER_WRAP_UP_AT_MS = 150_000
+const ANSWER_OVERTIME_GRACE_MS = 10_000
+/** In overtime, this much quiet counts as the candidate's natural pause. */
+const ANSWER_OVERTIME_PAUSE_MS = 900
+/** Batch partial STT re-sends the whole growing blob; stop partials past this length. */
+const MAX_PARTIAL_STT_MS = 60_000
+/** After Azure reports end of speech, wait this long for more words before ending the turn. */
+const AZURE_END_OF_TURN_GRACE_MS = 1_300
+const DEFAULT_END_SILENCE_MS = 2500
+
+/** True when the failure means no usable spoken words were captured. */
+function isNoAnswerHeardError(error: unknown): boolean {
+  const raw = errorMessage(error)
+  return /empty transcript|no answer audio|could not hear|could not detect your answer|no transcript|recognitionstatus|speech returned/i.test(
+    raw,
+  )
+}
+
+function formatCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+/** Max times one question is replayed because the candidate asked to hear it again. */
+const MAX_QUESTION_REPEATS = 2
+const REPEAT_REQUEST_PATTERN = /\b(repeat|say (that|it) again|come again|pardon|one more time|once more|again please|didn'?t (hear|catch|get|understand)|did not (hear|catch|get|understand)|can'?t hear|could ?n'?o?t hear|not (audible|clear))\b/i
+
+/** Short utterances like "sorry, please repeat the question" — not a real answer. */
+function isRepeatRequest(text: string): boolean {
+  const normalized = text.toLowerCase().replace(/[^a-z' ]+/g, ' ').trim()
+  if (!normalized) return false
+  if (normalized.split(/\s+/).length > 14) return false
+  return REPEAT_REQUEST_PATTERN.test(normalized)
+}
+
+/** Never show provider / model / library names to candidates. */
 function candidateSpeechError(error: unknown): string {
   const raw = errorMessage(error)
   if (
-    /empty transcript|azure speech|whisper|speech-to-text|\bstt\b|no answer audio|could not detect your answer|transcri/i.test(
+    /azure|whisper|openai|gpt-?4|groq|langgraph|langchain|speech.?sdk|speech.?to.?text|\bstt\b|tts\b|cognitiveservices|empty transcript|no answer audio|could not detect your answer|transcri|recognitionstatus|mediapipe|webrtc/i.test(
       raw,
     )
   ) {
     return 'We could not hear your answer clearly. Please speak again after the question.'
   }
-  return raw
+  // Strip leftover vendor tokens from otherwise usable messages.
+  const cleaned = raw
+    .replace(/\b(Azure|Whisper|OpenAI|GPT-4o?|Groq|LangGraph|LangChain|MediaPipe)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+  return cleaned || 'Something went wrong. Please try again.'
+}
+
+function candidateVoiceFallback(error: unknown, fallback: string): string {
+  const raw = errorMessage(error)
+  if (/azure|whisper|openai|gpt|groq|speech|tts|stt|sdk|cognitiveservices/i.test(raw)) {
+    return fallback
+  }
+  return `${fallback} (${candidateSpeechError(error)})`
 }
 
 function terminationCopy(reason: string | null | undefined): string {
@@ -196,8 +253,34 @@ function voiceCompletionPercent(result: VerificationResponse): number {
   return Number(sentence?.completion_percentage ?? 0)
 }
 
-function voiceFullyCaptured(result: VerificationResponse): boolean {
-  return Boolean(result.passed) && voiceCompletionPercent(result) >= 99.5
+function liveVoiceSentenceComplete(expectedText: string, transcript: string): boolean {
+  const expected = expectedText.trim()
+  if (!expected) return false
+  const progress = evaluateLiveSentence(expected, transcript)
+  return (
+    progress.words.length > 0
+    && progress.completedCount >= progress.words.length
+    && progress.incorrectCount === 0
+  )
+}
+
+function speakerVerificationPassed(result: VerificationResponse): boolean {
+  const speaker = result.speaker_verification
+    ?? (result.measurements?.speaker_verification as { passed?: boolean } | undefined)
+  return Boolean(result.passed || speaker?.passed)
+}
+
+/** Accept when backend passes, or live UI was all-green with a solid sentence/speaker match. */
+function voiceFullyCaptured(result: VerificationResponse, liveComplete = false): boolean {
+  const pct = voiceCompletionPercent(result)
+  const sentence = result.sentence_verification
+    ?? (result.measurements?.sentence_verification as { passed?: boolean } | undefined)
+  const sentencePassed = Boolean(sentence?.passed) || pct >= 90
+  if (result.passed && pct >= 90) return true
+  if (liveComplete && sentencePassed && speakerVerificationPassed(result)) return true
+  // Live words were all green — Whisper often trails slightly; do not force another loop.
+  if (liveComplete && (sentencePassed || pct >= 85)) return true
+  return false
 }
 
 function faceStatusCopy(action: 'enroll' | 'verify', result: VerificationResponse): { ok: boolean; title: string; detail: string } {
@@ -294,6 +377,10 @@ export function CandidatePage() {
   const [candidateJobTitle, setCandidateJobTitle] = useState('')
   const [introPlayed, setIntroPlayed] = useState(false)
   const [conversationState, setConversationState] = useState<'idle' | 'ai_speaking' | 'listening' | 'processing'>('idle')
+  /** Which STT transport the current/last answer used; null until the first answer. */
+  const [sttTransport, setSttTransport] = useState<'streaming' | 'batch' | null>(null)
+  /** Elapsed ms of the current spoken answer; null when not capturing. */
+  const [answerElapsedMs, setAnswerElapsedMs] = useState<number | null>(null)
   const [interviewStage, setInterviewStage] = useState<'idle' | 'mcq' | 'oral'>('idle')
   const [mcq, setMcq] = useState<McqStateResponse | null>(null)
   const [mcqRemaining, setMcqRemaining] = useState(0)
@@ -348,16 +435,26 @@ export function CandidatePage() {
   const reconnectTimerRef = useRef<number | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const messageTimerRef = useRef<number | null>(null)
-  const ttsAudioRef = useRef<HTMLAudioElement | null>(null)
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null) as AudioPlayerRef
   const answerRecorderRef = useRef<MediaRecorder | null>(null)
   const startAnswerCaptureRef = useRef<(() => Promise<void>) | null>(null)
   const submitAnswerCaptureRef = useRef<(() => Promise<void>) | null>(null)
-  const speakAiQuestionRef = useRef<((current: CandidateSessionCredentials, session: AiInterviewSessionResponse) => Promise<void>) | null>(null)
+  const speakAiQuestionRef = useRef<((
+    current: CandidateSessionCredentials,
+    session: AiInterviewSessionResponse,
+    turn?: InterviewTurnTrace | null,
+    options?: { forceReplay?: boolean; preface?: string },
+  ) => Promise<void>) | null>(null)
   const lastBroadcastQuestionIdRef = useRef<string | null>(null)
   const answerChunksRef = useRef<Blob[]>([])
   const liveAnswerTranscriptRef = useRef('')
   const partialSttInFlightRef = useRef(false)
   const lastPartialBlobSizeRef = useRef(0)
+  const lastPartialTextLenRef = useRef(0)
+  const answerStartedAtRef = useRef(0)
+  const azureEndTimerRef = useRef<number | null>(null)
+  const maxAnswerTimerRef = useRef<number | null>(null)
+  const sttFallbackNotifiedRef = useRef(false)
   const partialSttTimerRef = useRef<number | null>(null)
   const answerQuestionIdRef = useRef<string | null>(null)
   const aiSessionRef = useRef<AiInterviewSessionResponse | null>(null)
@@ -365,8 +462,21 @@ export function CandidatePage() {
   const leavingInterviewRef = useRef(false)
   const capturingAnswerRef = useRef(false)
   const silenceMonitorRef = useRef<SilenceMonitor | null>(null)
+  const latencyTurnRef = useRef<InterviewTurnTrace | null>(null)
+  const silenceMetaRef = useRef<{ silenceWaitMs: number } | null>(null)
+  const sttModeRef = useRef<'batch' | 'streaming'>('batch')
+  const endSilenceMsRef = useRef(DEFAULT_END_SILENCE_MS)
+  const streamingSttRef = useRef<StreamingSttClient | null>(null)
+  const liveTranscriptAccRef = useRef(new TranscriptAccumulator())
   const submittingAnswerRef = useRef(false)
   const skipUnansweredRef = useRef<(() => Promise<void>) | null>(null)
+  const handleNoAnswerHeardRef = useRef<(() => Promise<void>) | null>(null)
+  /** Per-question count of "no words heard" events (silence timeout or empty transcript). */
+  const noAnswerAttemptsRef = useRef<{ questionId: string | null; count: number }>({
+    questionId: null,
+    count: 0,
+  })
+  const questionRepeatsRef = useRef<{ questionId: string | null; count: number }>({ questionId: null, count: 0 })
   const durationExtendedNotifiedRef = useRef(false)
   const hangingUpRef = useRef(false)
   const speakingNowRef = useRef<string | null>(null)
@@ -430,7 +540,12 @@ export function CandidatePage() {
     }
     if (isClosingSession(aiSession)) return 'Closing'
     if (isCandidateQnaSession(aiSession)) return 'Your questions'
-    return `${aiSession?.current_question?.category_name || 'Interview question'}${aiSession ? ` · ${(aiSession.current_index || 0) + 1} of ${aiSession.total_questions || 0}` : ''}`
+    const rawCategory = String(aiSession?.current_question?.category_name || 'Interview question')
+    // Never show internal Agent 6 / adaptive labels to the candidate.
+    const category = /agent\s*6|adaptive/i.test(rawCategory)
+      ? (aiSession?.current_question?.is_followup ? 'Follow-up' : 'Interview question')
+      : rawCategory
+    return `${category}${aiSession ? ` · ${(aiSession.current_index || 0) + 1} of ${aiSession.total_questions || 0}` : ''}`
   }, [aiInterviewStarted, aiSession, interviewStage, isHrParticipant, mcq])
 
   const otherPartyPresent = isHrParticipant ? candidatePresent : hrPresent
@@ -492,8 +607,18 @@ export function CandidatePage() {
   const stopSilenceMonitor = useCallback(() => {
     silenceMonitorRef.current?.stop()
     silenceMonitorRef.current = null
+    if (azureEndTimerRef.current) window.clearTimeout(azureEndTimerRef.current)
+    azureEndTimerRef.current = null
+    if (maxAnswerTimerRef.current) window.clearInterval(maxAnswerTimerRef.current)
+    maxAnswerTimerRef.current = null
+    setAnswerElapsedMs(null)
     stopPartialStt()
   }, [stopPartialStt])
+
+  const stopStreamingStt = useCallback(() => {
+    streamingSttRef.current?.close()
+    streamingSttRef.current = null
+  }, [])
 
   const closeInterviewTab = useCallback(() => {
     sessionStorage.removeItem('agent5-session')
@@ -1017,12 +1142,20 @@ export function CandidatePage() {
       }
       recorder.start(250)
 
-      // Stop early once every expected word has been recognized live.
+      // Stop shortly after every expected word is green so Whisper still gets trailing audio.
       earlyStopTimer = window.setInterval(() => {
         if (recorder.state === 'inactive') return
         const progress = evaluateLiveSentence(voiceSentenceTextRef.current, recognizedTranscriptRef.current)
-        if (progress.completedCount > 0 && progress.completedCount >= progress.words.length) {
-          recorder.stop()
+        if (
+          progress.completedCount > 0
+          && progress.completedCount >= progress.words.length
+          && progress.incorrectCount === 0
+        ) {
+          window.clearInterval(earlyStopTimer)
+          earlyStopTimer = undefined
+          window.setTimeout(() => {
+            if (recorder.state !== 'inactive') recorder.stop()
+          }, 550)
         }
       }, 200)
 
@@ -1060,12 +1193,24 @@ export function CandidatePage() {
 
     try {
       const result = await sendVoice(action)
+      // Evaluate live green words after the recording ends (transcript fills while speaking).
+      const liveComplete = liveVoiceSentenceComplete(
+        voiceSentenceTextRef.current || voiceSentence?.text || '',
+        recognizedTranscriptRef.current,
+      )
       setVoiceResult(result)
-      const captured = voiceFullyCaptured(result)
+      // Server flags unlock Start. Live-green only helps acceptance when Whisper is close.
+      const captured = Boolean(result.passed) || voiceFullyCaptured(result, liveComplete)
+      const serverAccepted = Boolean(result.passed)
       setBiometrics((current) => ({
         ...current,
-        voiceEnrolled: action === 'enroll' ? captured : current.voiceEnrolled,
-        voiceVerified: action === 'verify' ? captured : current.voiceVerified,
+        voiceEnrolled: action === 'enroll'
+          ? (serverAccepted || current.voiceEnrolled)
+          : current.voiceEnrolled,
+        // Start API requires session.initial_voice_verified — only trust server pass.
+        voiceVerified: serverAccepted
+          ? true
+          : (action === 'verify' ? false : current.voiceVerified),
       }))
       const sentence = result.sentence_verification
       const transcript = sentence?.recognized_transcript
@@ -1079,17 +1224,17 @@ export function CandidatePage() {
       } else if (sentence && sentence.recognition_available === false) {
         setTranscriptionError('Voice capture is unavailable at the moment. Please try again, or contact HR if this continues.')
       }
-      const copy = voiceStatusCopy(action, captured)
-      if (action === 'enroll' && captured) {
-        showMessage(`${copy.title}. ${copy.detail}`, 'success')
-        window.setTimeout(() => {
-          if (phaseRef.current === 'enrollment' && !leavingInterviewRef.current) {
-            void handleVoice('verify')
-          }
-        }, 700)
+      const copy = voiceStatusCopy(action, serverAccepted || captured)
+      if (action === 'enroll' && serverAccepted) {
+        showMessage('Voice verified. You can start the interview when face checks are done.', 'success')
         return
       }
-      showMessage(`${copy.title}. ${copy.detail}`, copy.ok ? 'success' : 'error')
+      if (action === 'enroll' && captured && !serverAccepted) {
+        // Live words looked good but server did not persist enrollment — retry enroll (verify needs a baseline).
+        showMessage('Almost there — please read the sentence once more so we can save your voice.', 'warning')
+        return
+      }
+      showMessage(`${copy.title}. ${copy.detail}`, serverAccepted ? 'success' : 'error')
     } catch (error) {
       showMessage(errorMessage(error), 'error')
     } finally {
@@ -1713,7 +1858,13 @@ export function CandidatePage() {
       let displayName = fullName.trim()
       let jobTitle = candidateJobTitle
       try {
-        const runtime = await requestJson<{ full_name?: string; job_position?: string }>(
+        const runtime = await requestJson<{
+          full_name?: string
+          job_position?: string
+          effective_stt_mode?: string
+          interview_stt_mode?: string
+          end_silence_ms?: number
+        }>(
           `/api/interview/room/sessions/${current.sessionId}/runtime`,
           {},
           current.token,
@@ -1722,8 +1873,22 @@ export function CandidatePage() {
         if (runtime.job_position) jobTitle = runtime.job_position
         setCandidateDisplayName(displayName)
         setCandidateJobTitle(jobTitle || '')
+        const mode = String(runtime.effective_stt_mode || runtime.interview_stt_mode || 'batch').toLowerCase()
+        sttModeRef.current = mode === 'streaming' ? 'streaming' : 'batch'
+        if (Number.isFinite(runtime.end_silence_ms) && Number(runtime.end_silence_ms) > 0) {
+          endSilenceMsRef.current = Math.max(800, Math.min(10_000, Number(runtime.end_silence_ms)))
+        }
       } catch {
         if (displayName) setCandidateDisplayName(displayName)
+        try {
+          const modeInfo = await fetchSttMode(current.sessionId, current.token)
+          sttModeRef.current = modeInfo.effective_mode
+          if (modeInfo.end_silence_ms > 0) {
+            endSilenceMsRef.current = Math.max(800, Math.min(10_000, modeInfo.end_silence_ms))
+          }
+        } catch {
+          sttModeRef.current = 'batch'
+        }
       }
       showMessage(
         hrMode
@@ -1754,16 +1919,46 @@ export function CandidatePage() {
         }
         if (mcqState?.status === 'pending') {
           const intro = session.welcome_message || mcqState.intro_message || ''
-          if (intro) await speakAiText(current, intro)
-          if (mcqState.rules_message) await speakAiText(current, mcqState.rules_message)
-          mcqState = await requestJson<McqStateResponse>(
-            `/api/interview/room/sessions/${current.sessionId}/ai/mcq/start`,
-            jsonRequest('POST', {}),
-            current.token,
-            60_000,
-          )
+          const rules = mcqState.rules_message || ''
+          // Keep MCQ locked (status stays pending) until intro/rules TTS finishes.
+          setBusy('Listen to the AI introduction…')
+          try {
+            if (intro) await speakAiText(current, intro)
+            if (rules) await speakAiText(current, rules)
+          } catch (speakError) {
+            showMessage(candidateVoiceFallback(speakError, 'Voice unavailable. Read the MCQ instructions on screen.'), 'warning')
+          }
+          setBusy('')
+          try {
+            mcqState = await requestJson<McqStateResponse>(
+              `/api/interview/room/sessions/${current.sessionId}/ai/mcq/start`,
+              jsonRequest('POST', {}),
+              current.token,
+              60_000,
+            )
+          } catch (startError) {
+            // Recovery: start may have succeeded after the client timed out.
+            try {
+              const recovered = await requestJson<McqStateResponse>(
+                `/api/interview/room/sessions/${current.sessionId}/ai/mcq`,
+                {},
+                current.token,
+                30_000,
+              )
+              if (String(recovered.status || '') === 'in_progress' || isMcqDone(recovered)) {
+                mcqState = recovered
+              } else {
+                throw startError
+              }
+            } catch {
+              throw startError
+            }
+            showMessage('MCQ start was slow; recovered existing session status.', 'notice')
+          }
           setMcq(mcqState)
           setMcqRemaining(Number(mcqState.remaining_seconds || 0))
+          setIntroPlayed(true)
+          return
         }
         setIntroPlayed(true)
         return
@@ -1825,7 +2020,7 @@ export function CandidatePage() {
     try {
       await playSpokenText(current.sessionId, current.token, text, setAiSpeaking, ttsAudioRef as AudioPlayerRef)
     } catch (error) {
-      showMessage(`Voice unavailable: ${errorMessage(error)}. Read the text on screen.`, 'warning')
+      showMessage(candidateVoiceFallback(error, 'Voice unavailable. Read the text on screen.'), 'warning')
     } finally {
       setConversationState('idle')
     }
@@ -1837,6 +2032,8 @@ export function CandidatePage() {
   const speakAiQuestion = useCallback(async (
     current: CandidateSessionCredentials,
     session: AiInterviewSessionResponse,
+    turn?: InterviewTurnTrace | null,
+    options?: { forceReplay?: boolean; preface?: string },
   ) => {
     if (hangingUpRef.current || leavingInterviewRef.current) return
     if (interviewStageRef.current === 'mcq') return
@@ -1849,30 +2046,49 @@ export function CandidatePage() {
     const text = question?.question_text
     if (!questionId && !text) return
     const speakKey = questionId || text || ''
-    if (speakKey && speakingNowRef.current === speakKey) return
+    if (!options?.forceReplay && speakKey && speakingNowRef.current === speakKey) return
     speakingNowRef.current = speakKey
     lastBroadcastQuestionIdRef.current = questionId || null
     const ack = (session.turn_ack || '').trim()
+    const combined = (session.spoken_prompt || '').trim()
+      || (session.tts_combine_ack && ack && text ? `${ack} ${text}`.trim() : '')
+    const latency = turn || latencyTurnRef.current
+    const preface = (options?.preface || '').trim()
     setConversationState('ai_speaking')
     try {
-      if (ack && !question?.is_candidate_qna && !String(questionId || '').startsWith('qna-')) {
+      if (preface) {
+        latency?.unavailable('acknowledgement_tts_ms')
         await playSpokenText(
           current.sessionId,
           current.token,
-          ack,
+          `${preface} ${text || ''}`.trim(),
           setAiSpeaking,
           ttsAudioRef as AudioPlayerRef,
+          { turn: latency, ttsRole: 'question', preferStream: true },
         )
-      }
-      if (question?.is_candidate_qna || String(questionId || '').startsWith('qna-')) {
+      } else if (question?.is_candidate_qna || String(questionId || '').startsWith('qna-')) {
+        latency?.unavailable('acknowledgement_tts_ms')
         await playSpokenText(
           current.sessionId,
           current.token,
           text || '',
           setAiSpeaking,
           ttsAudioRef as AudioPlayerRef,
+          { turn: latency, ttsRole: 'question', preferStream: true },
+        )
+      } else if (combined && !String(questionId || '').startsWith('qna-')) {
+        // One utterance = one TTS request (avoids serial ack then question playback).
+        latency?.setSpan('acknowledgement_tts_ms', 0)
+        await playSpokenText(
+          current.sessionId,
+          current.token,
+          combined,
+          setAiSpeaking,
+          ttsAudioRef as AudioPlayerRef,
+          { turn: latency, ttsRole: 'combined', preferStream: true },
         )
       } else {
+        latency?.unavailable('acknowledgement_tts_ms')
         await playQuestionAudio(
           current.sessionId,
           current.token,
@@ -1880,10 +2096,20 @@ export function CandidatePage() {
           text,
           setAiSpeaking,
           ttsAudioRef as AudioPlayerRef,
+          { turn: latency, ttsRole: 'question' },
         )
       }
+      if (latency) {
+        if (latency.spans.total_turn_latency_ms == null) {
+          latency.measure('total_turn_latency_ms', 'candidate_speech_end')
+        }
+        latency.beacon(current.token, 'client_turn_complete')
+        latencyTurnRef.current = null
+      }
     } catch (error) {
-      showMessage(`Question voice unavailable: ${errorMessage(error)}. Read the question on screen.`, 'warning')
+      showMessage(candidateVoiceFallback(error, 'Question voice unavailable. Read the question on screen.'), 'warning')
+      latency?.beacon(current.token, 'client_turn_tts_error')
+      latencyTurnRef.current = null
     } finally {
       if (speakingNowRef.current === speakKey) speakingNowRef.current = null
       setConversationState('idle')
@@ -2026,6 +2252,12 @@ export function CandidatePage() {
     setConversationState('idle')
   }, [])
 
+  /** Red hang-up / leave prompt: mute AI immediately (do not wait for confirm). */
+  const openLeaveDialog = useCallback(() => {
+    stopTts()
+    setLeaveOpen(true)
+  }, [stopTts])
+
   const speakClosingThenHangUp = useCallback(async (
     current: CandidateSessionCredentials,
     session: AiInterviewSessionResponse,
@@ -2049,7 +2281,7 @@ export function CandidatePage() {
         45_000,
       )
     } catch (error) {
-      showMessage(`Voice unavailable: ${errorMessage(error)}. Read the closing message on screen.`, 'warning')
+      showMessage(candidateVoiceFallback(error, 'Voice unavailable. Read the closing message on screen.'), 'warning')
     } finally {
       setConversationState('idle')
     }
@@ -2154,79 +2386,224 @@ export function CandidatePage() {
       setAiSpeaking(false)
       answerChunksRef.current = []
       liveAnswerTranscriptRef.current = ''
+      liveTranscriptAccRef.current.reset()
       lastPartialBlobSizeRef.current = 0
+      lastPartialTextLenRef.current = 0
       partialSttInFlightRef.current = false
       answerQuestionIdRef.current = aiSessionRef.current?.current_question?.id || aiSession?.current_question?.id || null
+      const questionId = answerQuestionIdRef.current
+      if (noAnswerAttemptsRef.current.questionId !== questionId) {
+        noAnswerAttemptsRef.current = { questionId, count: 0 }
+      }
       stopMediaStream(answerRecordStreamRef.current)
       const answerStream = cloneMediaStream(stream, 'audio')
       answerRecordStreamRef.current = answerStream
+      // Always keep MediaRecorder for audit/proctoring — independent of STT transport.
       const recorder = startMediaRecorder(answerStream, 1000, {}, true, (created) => {
         created.ondataavailable = (event) => {
           if (event.data.size) answerChunksRef.current.push(event.data)
         }
       })
       answerRecorderRef.current = recorder
+      answerStartedAtRef.current = performance.now()
       setCapturingAnswer(true)
       setConversationState('listening')
-      showMessage('Your turn — speak your answer now. We will wait about 8 seconds for you to start.', 'notice')
+      const attempt = noAnswerAttemptsRef.current.count
+      showMessage(
+        attempt > 0
+          ? 'Last chance — please start speaking within 10 seconds.'
+          : 'Your turn — please start speaking within 10 seconds. If we hear nothing, we ask once more, then move on.',
+        'notice',
+      )
+
+      const useStreaming = sttModeRef.current === 'streaming'
+      if (useStreaming) {
+        stopPartialStt()
+        const current = credentialsRef.current
+        if (!current) throw new Error('Session credentials missing')
+        streamingSttRef.current?.close()
+        const cancelAzureEndOfTurn = () => {
+          if (azureEndTimerRef.current) window.clearTimeout(azureEndTimerRef.current)
+          azureEndTimerRef.current = null
+        }
+        const client = new StreamingSttClient(current.sessionId, current.token, {
+          onPartial: (text) => {
+            if (!text) return
+            cancelAzureEndOfTurn()
+            liveTranscriptAccRef.current.setPartial(text)
+            liveAnswerTranscriptRef.current = liveTranscriptAccRef.current.displayText()
+            silenceMonitorRef.current?.markSpeech()
+          },
+          onSegment: (text) => {
+            if (!text) return
+            liveTranscriptAccRef.current.addFinalSegment(text)
+            liveAnswerTranscriptRef.current = liveTranscriptAccRef.current.displayText()
+            silenceMonitorRef.current?.markSpeech()
+          },
+          onVad: (state) => {
+            if (state === 'start') {
+              cancelAzureEndOfTurn()
+              silenceMonitorRef.current?.markSpeech()
+              return
+            }
+            // Azure saw a speech boundary. End the turn after a short grace period unless more words arrive.
+            if (!capturingAnswerRef.current || submittingAnswerRef.current) return
+            if (!liveTranscriptAccRef.current.displayText().trim()) return
+            cancelAzureEndOfTurn()
+            azureEndTimerRef.current = window.setTimeout(() => {
+              azureEndTimerRef.current = null
+              if (!capturingAnswerRef.current || submittingAnswerRef.current) return
+              if (leavingInterviewRef.current || hangingUpRef.current) return
+              const turn = latencyTurnRef.current || createInterviewTurnTrace(credentialsRef.current?.sessionId || '')
+              turn.mark('candidate_speech_end')
+              turn.mark('azure_end_of_turn')
+              latencyTurnRef.current = turn
+              void submitAnswerCaptureRef.current?.()
+            }, AZURE_END_OF_TURN_GRACE_MS)
+          },
+          onError: (message, code) => {
+            console.warn('Streaming STT error', code, message)
+            if (code === 'streaming_disabled' || code === 'start_failed' || code === 'azure_canceled') {
+              console.warn('streaming_stt_fallback_reason', { code, message, stage: 'live' })
+              setSttTransport('batch')
+              // Keep trying streaming on later turns unless mode is explicitly disabled.
+              if (code === 'streaming_disabled') sttModeRef.current = 'batch'
+            }
+          },
+        })
+        streamingSttRef.current = client
+        const turn = createInterviewTurnTrace(current.sessionId)
+        latencyTurnRef.current = turn
+        try {
+          await client.startTurn({
+            mediaStream: stream,
+            questionId: answerQuestionIdRef.current,
+            turn,
+          })
+          setSttTransport('streaming')
+        } catch (error) {
+          console.warn('streaming_stt_fallback_reason', {
+            code: 'start_failed',
+            message: error instanceof Error ? error.message : String(error),
+            stage: 'start',
+          })
+          client.close()
+          streamingSttRef.current = null
+          setSttTransport('batch')
+          if (!sttFallbackNotifiedRef.current) {
+            sttFallbackNotifiedRef.current = true
+            showMessage('Live transcription is unavailable — your answer is still being recorded and will be transcribed when you finish.', 'warning')
+          }
+          // One-turn batch fallback only; do not permanently disable streaming.
+        }
+      } else {
+        setSttTransport('batch')
+      }
+
+      // Countdown starts once the AI has finished reading the question and capture is live.
+      // Short answers still end on the normal silence detection; this only bounds long ones.
+      if (maxAnswerTimerRef.current) window.clearInterval(maxAnswerTimerRef.current)
+      let wrapUpShown = false
+      let overtimeShown = false
+      setAnswerElapsedMs(0)
+      maxAnswerTimerRef.current = window.setInterval(() => {
+        const elapsed = performance.now() - answerStartedAtRef.current
+        setAnswerElapsedMs(elapsed)
+        if (!capturingAnswerRef.current || submittingAnswerRef.current) return
+        if (leavingInterviewRef.current || hangingUpRef.current) return
+        if (!wrapUpShown && elapsed >= ANSWER_WRAP_UP_AT_MS) {
+          wrapUpShown = true
+          showMessage('Please start wrapping up your answer.', 'warning')
+        }
+        if (elapsed < MAX_ANSWER_MS) return
+        const quietMs = silenceMonitorRef.current?.msSinceSpeech() ?? Number.POSITIVE_INFINITY
+        const stillTalking = quietMs < ANSWER_OVERTIME_PAUSE_MS
+        if (stillTalking && elapsed < MAX_ANSWER_MS + ANSWER_OVERTIME_GRACE_MS) {
+          if (!overtimeShown) {
+            overtimeShown = true
+            showMessage('Time is up — please finish your sentence.', 'warning')
+          }
+          return
+        }
+        if (maxAnswerTimerRef.current) window.clearInterval(maxAnswerTimerRef.current)
+        maxAnswerTimerRef.current = null
+        showMessage('Answer time is over — saving your answer.', 'notice')
+        void submitAnswerCaptureRef.current?.()
+      }, 250)
+
       silenceMonitorRef.current = startSilenceMonitor(
         stream,
-        () => {
+        (meta) => {
           if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
+          silenceMetaRef.current = meta ? { silenceWaitMs: meta.silenceWaitMs } : null
+          const turn = latencyTurnRef.current || createInterviewTurnTrace(credentialsRef.current?.sessionId || '')
+          turn.mark('candidate_speech_end')
+          turn.mark('silence_detection_complete')
+          if (meta) turn.setSpan('silence_wait_ms', meta.silenceWaitMs)
+          latencyTurnRef.current = turn
           void submitAnswerCaptureRef.current?.()
         },
         {
-          noSpeechTimeoutMs: 8000,
+          silenceMs: endSilenceMsRef.current,
+          noSpeechTimeoutMs: NO_SPEECH_TIMEOUT_MS,
           onNoSpeech: () => {
             if (!capturingAnswerRef.current || leavingInterviewRef.current || hangingUpRef.current) return
-            void skipUnansweredRef.current?.()
+            void handleNoAnswerHeardRef.current?.()
           },
         },
       )
 
-      // Live partial STT while speaking (same approach as HR interview lab).
+      // Batch partials are the live-text source only when streaming is not running for this turn.
       stopPartialStt()
       partialSttTimerRef.current = window.setInterval(() => {
-        void (async () => {
-          const current = credentialsRef.current
-          if (!current || !capturingAnswerRef.current) return
-          if (partialSttInFlightRef.current || submittingAnswerRef.current) return
-          if (answerRecorderRef.current?.state !== 'recording') return
-          if (!answerChunksRef.current.length) return
-          const blob = new Blob(answerChunksRef.current, { type: supportedMime(true) || 'audio/webm' })
-          if (blob.size < 8000 || blob.size - lastPartialBlobSizeRef.current < 4000) return
-          partialSttInFlightRef.current = true
-          try {
-            const form = new FormData()
-            form.append('file', blob, 'partial.webm')
-            form.append('partial', 'true')
-            if (answerQuestionIdRef.current) form.append('question_id', answerQuestionIdRef.current)
-            if (liveAnswerTranscriptRef.current) {
-              form.append('prior_text', liveAnswerTranscriptRef.current)
+          void (async () => {
+            const current = credentialsRef.current
+            if (!current || !capturingAnswerRef.current) return
+            if (streamingSttRef.current?.isReady) return
+            if (performance.now() - answerStartedAtRef.current > MAX_PARTIAL_STT_MS) return
+            if (partialSttInFlightRef.current || submittingAnswerRef.current) return
+            if (answerRecorderRef.current?.state !== 'recording') return
+            if (!answerChunksRef.current.length) return
+            const blob = new Blob(answerChunksRef.current, { type: supportedMime(true) || 'audio/webm' })
+            if (blob.size < 4000 || blob.size - lastPartialBlobSizeRef.current < 2000) return
+            partialSttInFlightRef.current = true
+            try {
+              const form = new FormData()
+              form.append('file', blob, 'partial.webm')
+              form.append('partial', 'true')
+              if (answerQuestionIdRef.current) form.append('question_id', answerQuestionIdRef.current)
+              if (liveAnswerTranscriptRef.current) {
+                form.append('prior_text', liveAnswerTranscriptRef.current)
+              }
+              const transcribed = await requestJson<{ text: string }>(
+                `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
+                { method: 'POST', body: form },
+                current.token,
+                60_000,
+              )
+              const text = (transcribed.text || '').trim()
+              if (text && text.length >= liveAnswerTranscriptRef.current.length) {
+                liveAnswerTranscriptRef.current = text
+              }
+              if (text && text.length > lastPartialTextLenRef.current) {
+                silenceMonitorRef.current?.markSpeech()
+              }
+              lastPartialTextLenRef.current = text.length
+              lastPartialBlobSizeRef.current = blob.size
+            } catch {
+              /* partial failures are silent; final pass retries */
+            } finally {
+              partialSttInFlightRef.current = false
             }
-            const transcribed = await requestJson<{ text: string }>(
-              `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
-              { method: 'POST', body: form },
-              current.token,
-              60_000,
-            )
-            const text = (transcribed.text || '').trim()
-            if (text && text.length >= liveAnswerTranscriptRef.current.length) {
-              liveAnswerTranscriptRef.current = text
-            }
-            lastPartialBlobSizeRef.current = blob.size
-          } catch {
-            /* partial failures are silent; final pass retries */
-          } finally {
-            partialSttInFlightRef.current = false
-          }
-        })()
-      }, 3000)
+          })()
+        }, 3000)
     } catch (error) {
       stopMediaStream(answerRecordStreamRef.current)
       answerRecordStreamRef.current = null
+      streamingSttRef.current?.close()
+      streamingSttRef.current = null
       setConversationState('idle')
-      showMessage(errorMessage(error), 'error')
+      showMessage(candidateSpeechError(error), 'error')
     }
   }
   startAnswerCaptureRef.current = startAnswerCapture
@@ -2236,8 +2613,21 @@ export function CandidatePage() {
     const session = aiSession
     if (!current || !session || leavingInterviewRef.current || hangingUpRef.current) return
     if (submittingAnswerRef.current) return
+    // Only a live recording can be submitted; re-submitting an already-stopped turn would loop on the same audio.
+    if (!answerRecorderRef.current) return
     submittingAnswerRef.current = true
+    const recordedMs = Math.max(0, performance.now() - answerStartedAtRef.current)
     stopSilenceMonitor()
+    let turn = latencyTurnRef.current
+    if (!turn) {
+      turn = createInterviewTurnTrace(current.sessionId)
+      turn.mark('candidate_speech_end')
+      turn.mark('silence_detection_complete')
+      if (silenceMetaRef.current) turn.setSpan('silence_wait_ms', silenceMetaRef.current.silenceWaitMs)
+      else turn.unavailable('silence_wait_ms')
+      latencyTurnRef.current = turn
+    }
+    turn.mark('media_recorder_stop_start')
     const recorder = answerRecorderRef.current
     if (recorder && recorder.state !== 'inactive') {
       await new Promise<void>((resolve) => {
@@ -2251,57 +2641,171 @@ export function CandidatePage() {
         recorder.stop()
       })
     }
+    turn.mark('media_recorder_stop_end')
     answerRecorderRef.current = null
     stopMediaStream(answerRecordStreamRef.current)
     answerRecordStreamRef.current = null
     setCapturingAnswer(false)
     setConversationState('processing')
-    setBusy('Processing your answer')
+    setBusy('Saving your answer')
     try {
       // Wait briefly if a partial STT call is still in flight.
       for (let i = 0; i < 20 && partialSttInFlightRef.current; i += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, 100))
       }
       const blob = new Blob(answerChunksRef.current, { type: supportedMime(true) || 'audio/webm' })
-      if (!blob.size) throw new Error('No answer audio was captured.')
-      const priorText = liveAnswerTranscriptRef.current.trim()
-      const form = new FormData()
-      form.append('file', blob, 'answer.webm')
-      if (session.current_question?.id) form.append('question_id', session.current_question.id)
-      if (priorText) form.append('prior_text', priorText)
-      const transcribed = await requestJson<{ text: string }>(
-        `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
-        { method: 'POST', body: form },
-        current.token,
-        120_000,
-      )
-      const finalText = (transcribed.text || '').trim()
-      const text = finalText.length >= priorText.length ? finalText : priorText
+      const priorText = liveTranscriptAccRef.current.finalizedText(true).trim()
+        || liveAnswerTranscriptRef.current.trim()
+      let text = ''
+      let usedBatchFallback = false
+
+      turn.setSpan('answer_recorded_ms', Math.round(recordedMs))
+
+      // Long answers are fine: the backend splits long audio into chunks. Partial text is the safety net.
+      const transcribeBlobBatch = async (opts?: { fallbackReason?: string }): Promise<string> => {
+        if (!blob.size) {
+          if (priorText) return priorText
+          throw new Error('No answer audio was captured.')
+        }
+        if (opts?.fallbackReason) {
+          console.warn('streaming_stt_fallback_reason', {
+            code: opts.fallbackReason,
+            stage: 'submit',
+            bytes: blob.size,
+            recordedSeconds: Math.round(recordedMs / 100) / 10,
+          })
+          turn.setSpan('stt_batch_fallback', 1)
+        }
+        try {
+          return await requestBatchTranscript()
+        } catch (error) {
+          if (priorText) {
+            console.warn('batch_transcribe_failed_using_partial_text', errorMessage(error))
+            return priorText
+          }
+          throw error
+        }
+      }
+
+      const requestBatchTranscript = async (): Promise<string> => {
+        const form = new FormData()
+        form.append('file', blob, 'answer.webm')
+        if (session.current_question?.id) form.append('question_id', session.current_question.id)
+        if (priorText) form.append('prior_text', priorText)
+        turn.mark('final_transcription_request_start')
+        turn.mark('audio_upload_start')
+        const uploadT0 = performance.now()
+        const transcribed = await requestJson<{ text: string }>(
+          `/api/interview/room/sessions/${current.sessionId}/ai/transcribe`,
+          { method: 'POST', body: form, headers: turnHeaders(turn) },
+          current.token,
+          120_000,
+        )
+        const transcribeRtt = Math.round((performance.now() - uploadT0) * 1000) / 1000
+        turn.setSpan('audio_upload_ms', transcribeRtt)
+        turn.setSpan('transcribe_request_ms', transcribeRtt)
+        turn.mark('final_transcription_request_end')
+        const finalText = (transcribed.text || '').trim()
+        return finalText.length >= priorText.length ? finalText : priorText
+      }
+
+      const streamingClient = streamingSttRef.current
+      if (sttModeRef.current === 'streaming' && streamingClient) {
+        turn.mark('final_transcription_request_start')
+        const streamed = await streamingClient.stopTurn(turn)
+        streamingClient.close()
+        streamingSttRef.current = null
+        turn.mark('final_transcription_request_end')
+        turn.unavailable('audio_upload_ms')
+        const streamedText = (streamed.text || '').trim()
+        const liveText = liveTranscriptAccRef.current.finalizedText(true).trim()
+        text = streamedText.length >= liveText.length ? streamedText : liveText
+        // Audit recording is independent of transcript generation.
+        if (blob.size && session.current_question?.id) {
+          const form = new FormData()
+          form.append('file', blob, 'answer.webm')
+          form.append('question_id', session.current_question.id)
+          void requestJson(
+            `/api/interview/room/sessions/${current.sessionId}/ai/answer-audio`,
+            { method: 'POST', body: form, headers: turnHeaders(turn) },
+            current.token,
+            60_000,
+          ).catch(() => undefined)
+        }
+        if (!text) {
+          usedBatchFallback = true
+          setSttTransport('batch')
+          text = await transcribeBlobBatch({
+            fallbackReason: streamed.error || 'empty_streaming_transcript',
+          })
+        }
+      } else {
+        text = await transcribeBlobBatch()
+      }
+      turn.setSpan('stt_mode_effective', usedBatchFallback ? 0 : sttModeRef.current === 'streaming' ? 1 : 0)
       liveAnswerTranscriptRef.current = ''
       if (!text) {
         throw new Error('We could not hear your answer clearly. Please speak again after the question.')
       }
+      // Successful words captured — reset no-answer retries for this turn.
+      noAnswerAttemptsRef.current = { questionId: session.current_question?.id || null, count: 0 }
+
+      const questionId = session.current_question?.id || null
+      if (questionRepeatsRef.current.questionId !== questionId) {
+        questionRepeatsRef.current = { questionId, count: 0 }
+      }
+      if (isRepeatRequest(text) && questionRepeatsRef.current.count < MAX_QUESTION_REPEATS) {
+        questionRepeatsRef.current = { questionId, count: questionRepeatsRef.current.count + 1 }
+        turn.beacon(current.token, 'client_turn_repeat_request')
+        latencyTurnRef.current = null
+        setConversationState('idle')
+        setBusy('')
+        submittingAnswerRef.current = false
+        speakingNowRef.current = null
+        showMessage('Repeating the question.', 'notice')
+        await speakAiQuestion(current, session, null, {
+          forceReplay: true,
+          preface: 'Sure, let me repeat the question.',
+        })
+        return
+      }
+      turn.mark('answer_request_start')
+      const answerT0 = performance.now()
+      const answerInit = jsonRequest('POST', { answer_text: text })
       const next = await requestJson<AiInterviewSessionResponse>(
         `/api/interview/room/sessions/${current.sessionId}/ai/answer`,
-        jsonRequest('POST', { answer_text: text }),
+        { ...answerInit, headers: turnHeaders(turn, answerInit.headers) },
         current.token,
         120_000,
       )
+      turn.setSpan('answer_api_ms', Math.round((performance.now() - answerT0) * 1000) / 1000)
+      turn.mark('answer_request_end')
       setAiSession(next)
       if (next.duration_extended && !durationExtendedNotifiedRef.current) {
         durationExtendedNotifiedRef.current = true
         showMessage('Interview time was extended so remaining questions can be completed.', 'notice')
       }
       if (isClosingSession(next)) {
+        turn.beacon(current.token, 'client_turn_closing')
+        latencyTurnRef.current = null
         await speakClosingThenHangUp(current, next)
         return
       }
       if (next.current_question?.is_candidate_qna) {
         showMessage('Interview questions are done. You may ask one short question, or say you are done.', 'notice')
       }
-      await speakAiQuestion(current, next)
+      await speakAiQuestion(current, next, turn)
     } catch (error) {
+      turn.beacon(current.token, 'client_turn_error')
+      latencyTurnRef.current = null
       setConversationState('idle')
+      if (isNoAnswerHeardError(error) && phaseRef.current === 'interview' && !leavingInterviewRef.current) {
+        // Release submit lock first so retry/skip can run.
+        submittingAnswerRef.current = false
+        setBusy('')
+        await handleNoAnswerHeardRef.current?.()
+        return
+      }
       showMessage(candidateSpeechError(error), 'error')
       if (phaseRef.current === 'interview' && !leavingInterviewRef.current) {
         await startAnswerCapture()
@@ -2313,13 +2817,9 @@ export function CandidatePage() {
   }
   submitAnswerCaptureRef.current = submitAnswerCapture
 
-  const skipUnansweredQuestion = async () => {
-    const current = credentialsRef.current
-    const session = aiSessionRef.current || aiSession
-    if (!current || !session || leavingInterviewRef.current || hangingUpRef.current) return
-    if (submittingAnswerRef.current) return
-    submittingAnswerRef.current = true
+  const stopAnswerCaptureLocal = () => {
     stopSilenceMonitor()
+    stopStreamingStt()
     const recorder = answerRecorderRef.current
     if (recorder && recorder.state !== 'inactive') {
       try { recorder.stop() } catch { /* ignore */ }
@@ -2328,9 +2828,19 @@ export function CandidatePage() {
     stopMediaStream(answerRecordStreamRef.current)
     answerRecordStreamRef.current = null
     setCapturingAnswer(false)
+  }
+
+  const skipUnansweredQuestion = async () => {
+    const current = credentialsRef.current
+    const session = aiSessionRef.current || aiSession
+    if (!current || !session || leavingInterviewRef.current || hangingUpRef.current) return
+    if (submittingAnswerRef.current) return
+    submittingAnswerRef.current = true
+    stopAnswerCaptureLocal()
+    noAnswerAttemptsRef.current = { questionId: null, count: 0 }
     setConversationState('processing')
     setBusy('No answer heard — moving on')
-    showMessage('No answer heard in time. Moving to the next question.', 'warning')
+    showMessage('No answer heard after two chances. Moving to the next question.', 'warning')
     try {
       const next = await requestJson<AiInterviewSessionResponse>(
         `/api/interview/room/sessions/${current.sessionId}/ai/answer`,
@@ -2356,6 +2866,62 @@ export function CandidatePage() {
     }
   }
   skipUnansweredRef.current = skipUnansweredQuestion
+
+  const handleNoAnswerHeard = async () => {
+    if (leavingInterviewRef.current || hangingUpRef.current || isHrParticipantRef.current) return
+    if (submittingAnswerRef.current) return
+    const current = credentialsRef.current
+    const session = aiSessionRef.current || aiSession
+    if (!current || !session) return
+
+    const questionId = answerQuestionIdRef.current || session.current_question?.id || null
+    if (noAnswerAttemptsRef.current.questionId !== questionId) {
+      noAnswerAttemptsRef.current = { questionId, count: 0 }
+    }
+    // STT heard words even though the level meter did not: submit the still-live recording.
+    // After a failed submit the recorder is gone, so this cannot re-enter submit for the same audio.
+    const heardText = (liveTranscriptAccRef.current.displayText() || liveAnswerTranscriptRef.current || '').trim()
+    if (heardText && answerRecorderRef.current) {
+      void submitAnswerCaptureRef.current?.()
+      return
+    }
+
+    const micTracks = streamRef.current?.getAudioTracks() || []
+    const micUnavailable = !micTracks.length || micTracks.every((track) => !track.enabled || track.readyState !== 'live' || track.muted)
+    if (micUnavailable) {
+      stopAnswerCaptureLocal()
+      setConversationState('idle')
+      setBusy('')
+      showMessage('Your microphone is muted or unavailable. Unmute it — we will listen again.', 'warning')
+      window.setTimeout(() => {
+        if (leavingInterviewRef.current || hangingUpRef.current) return
+        void startAnswerCaptureRef.current?.()
+      }, 4000)
+      return
+    }
+
+    noAnswerAttemptsRef.current = {
+      questionId,
+      count: noAnswerAttemptsRef.current.count + 1,
+    }
+
+    stopAnswerCaptureLocal()
+    setConversationState('idle')
+    setBusy('')
+
+    if (noAnswerAttemptsRef.current.count <= NO_ANSWER_RETRY_LIMIT) {
+      showMessage('No answer heard. Asking the question again — please speak within 10 seconds.', 'warning')
+      speakingNowRef.current = null
+      await speakAiQuestion(current, session, null, {
+        forceReplay: true,
+        preface: "I didn't hear an answer. Let me ask once more.",
+      })
+      return
+    }
+
+    await skipUnansweredQuestion()
+  }
+  handleNoAnswerHeardRef.current = handleNoAnswerHeard
 
   const stopRecorders = useCallback(async () => {
     if (frameTimerRef.current) window.clearInterval(frameTimerRef.current)
@@ -2694,6 +3260,7 @@ export function CandidatePage() {
 
   const confirmLeaveInterview = useCallback(async () => {
     const current = credentialsRef.current
+    hangingUpRef.current = true
     leavingInterviewRef.current = true
     setLeaveOpen(false)
     stopSilenceMonitor()
@@ -2767,6 +3334,7 @@ export function CandidatePage() {
     const onPopState = () => {
       if (phaseRef.current !== 'interview') return
       window.history.pushState(null, '', window.location.href)
+      stopTts()
       setLeaveOpen(true)
     }
     document.addEventListener('fullscreenchange', onFullscreen)
@@ -2780,7 +3348,7 @@ export function CandidatePage() {
       window.removeEventListener('beforeunload', onBeforeUnload)
       window.removeEventListener('popstate', onPopState)
     }
-  }, [phase])
+  }, [phase, stopTts])
 
   return (
     <>
@@ -2961,7 +3529,11 @@ export function CandidatePage() {
                   )}
                 </div>
                 <div id="voiceResult">{voiceResult && (() => {
-                  const captured = voiceFullyCaptured(voiceResult)
+                  const liveComplete = liveVoiceSentenceComplete(
+                    voiceSentence?.text || '',
+                    recognizedTranscript,
+                  )
+                  const captured = voiceFullyCaptured(voiceResult, liveComplete) || biometrics.voiceVerified
                   const copy = voiceStatusCopy(biometrics.voiceVerified || (biometrics.voiceEnrolled && captured) ? 'verify' : 'enroll', captured)
                   return (
                     <div className={`result-box ${copy.ok ? 'success' : 'error'}`}>
@@ -3110,7 +3682,7 @@ export function CandidatePage() {
                       label={isHrParticipant ? 'Leave room' : 'End interview'}
                       variant="danger"
                       disabled={Boolean(busy) && conversationState === 'processing' && !isHrParticipant}
-                      onClick={() => setLeaveOpen(true)}
+                      onClick={openLeaveDialog}
                     >
                       <HangUpIcon />
                     </MeetFab>
@@ -3220,7 +3792,7 @@ export function CandidatePage() {
                       mcq={mcq}
                       remainingSeconds={mcqRemaining}
                       lockedOptionId={mcqLockedOptionId}
-                      busy={mcqBusy}
+                      busy={mcqBusy || aiSpeaking}
                       isHr={false}
                       onSelect={(optionId) => void submitMcqChoice(optionId)}
                       onSkip={() => void submitMcqChoice(undefined, true)}
@@ -3229,7 +3801,7 @@ export function CandidatePage() {
                     <>
                       <p className={`meet-status-line meet-turn-banner ${conversationState === 'ai_speaking' || aiSpeaking ? 'speaking' : conversationState === 'listening' || capturingAnswer ? 'listening' : conversationState === 'processing' ? 'speaking' : ''}`}>
                         {conversationState === 'processing' || busy
-                          ? 'Processing your answer…'
+                          ? 'Saving your answer…'
                           : aiSpeaking || conversationState === 'ai_speaking'
                             ? 'AI is speaking — please listen'
                             : capturingAnswer || conversationState === 'listening'
@@ -3238,9 +3810,19 @@ export function CandidatePage() {
                                 ? 'Paused for HR'
                                 : 'Waiting for the AI interviewer'}
                       </p>
+                      {capturingAnswer && answerElapsedMs != null && (
+                        <p
+                          className={`meet-answer-countdown ${answerElapsedMs >= MAX_ANSWER_MS ? 'overtime' : answerElapsedMs >= ANSWER_WRAP_UP_AT_MS ? 'wrap-up' : ''}`}
+                          aria-live="polite"
+                        >
+                          {answerElapsedMs >= MAX_ANSWER_MS
+                            ? 'Time is up — finish your sentence'
+                            : `Time left ${formatCountdown(MAX_ANSWER_MS - answerElapsedMs)}`}
+                        </p>
+                      )}
                       {(capturingAnswer || conversationState === 'listening') && (
                         <p className="meet-turn-hint">
-                          Take a moment to think. We wait about 8 seconds for you to start speaking.
+                          Take a moment to think. We wait 10 seconds for you to start speaking. If there is no answer, we ask once more, then move on.
                         </p>
                       )}
                     </>
@@ -3250,6 +3832,9 @@ export function CandidatePage() {
                   <div className="meet-status-stack">
                     <div><span>Camera</span><StatusPill label={faceLive.state === 'bad' ? 'Adjust position' : 'Active'} state={faceLive.state} /></div>
                     <div><span>Microphone</span><StatusPill label={capturingAnswer ? 'Recording answer' : voiceLive.state === 'bad' ? 'Check mic' : 'Active'} state={capturingAnswer ? 'ok' : voiceLive.state === 'bad' ? 'bad' : 'ok'} /></div>
+                    {sttTransport && (
+                      <div><span>Transcription</span><StatusPill label={sttTransport === 'streaming' ? 'Live' : 'Backup mode'} state={sttTransport === 'streaming' ? 'ok' : 'warning'} /></div>
+                    )}
                     <div><span>Session</span><StatusPill label={active ? 'Recording' : 'Paused'} state={active ? 'ok' : 'warning'} /></div>
                     <div><span>Connection</span><StatusPill label={connectionLive.label} state={connectionLive.state} /></div>
                   </div>

@@ -78,9 +78,32 @@ def calculate_score(events: Iterable[FraudEvent]) -> tuple[float, str, dict[str,
 
 
 def recalculate_session_risk(db: Session, session: InterviewSession) -> tuple[float, str, dict[str, float]]:
-    events = db.scalars(select(FraudEvent).where(FraudEvent.session_id == session.id).order_by(FraudEvent.server_timestamp)).all()
-    score, classification, totals = calculate_score(events)
-    session.risk_score = score
+    """Persist the current human-review-adjusted fraud score.
+
+    Dismissed events remain stored for audit/evidence but contribute zero.
+
+    Face-spoof concerns are review-only evidence. A pending spoof concern does
+    not affect the session score; it contributes only after human confirmation.
+    All other event scoring behavior remains unchanged.
+    """
+    events = db.scalars(
+        select(FraudEvent)
+        .where(FraudEvent.session_id == session.id)
+        .order_by(FraudEvent.server_timestamp)
+    ).all()
+
+    applicable_events = [
+        event
+        for event in events
+        if event.review_status != "dismissed"
+        and not (
+            event.event_type == "face_spoof_concern"
+            and event.review_status != "confirmed"
+        )
+    ]
+
+    score, classification, totals = calculate_score(applicable_events)
+    session.risk_score = max(0.0, score)
     session.risk_classification = classification
     db.add(session)
-    return score, classification, totals
+    return session.risk_score, classification, totals

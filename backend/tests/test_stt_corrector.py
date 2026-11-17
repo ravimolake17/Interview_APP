@@ -180,6 +180,7 @@ def test_llm_path_skips_fact_injection(monkeypatch):
         context={"job_position": "Python Developer", "skills": "Python"},
         resume_terms=_ravi_terms(),
         candidate_name="Ravi Molake",
+        force_llm=True,
     )
     assert "99.57" not in result["text"]
     assert "Infinity Publication" in result["text"]

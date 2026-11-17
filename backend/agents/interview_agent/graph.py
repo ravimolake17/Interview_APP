@@ -151,6 +151,14 @@ class InterviewLangGraphAgent:
         if duration is None:
             duration = await self.service.default_duration_minutes()
         questions_payload = [q.model_dump(mode="json") for q in question_set.questions]
+        # Older banks may lack baked-in planned follow-ups — materialize once at start.
+        if not any(bool(q.get("planned")) for q in questions_payload if isinstance(q, dict)):
+            try:
+                from agents.interview_agent.planned_followups import materialize_planned_followups
+
+                questions_payload = materialize_planned_followups(questions_payload)
+            except Exception:
+                logger.debug("Session-start planned follow-up materialization skipped", exc_info=True)
         try:
             from services.interview_speed_cache import cache_question_bank, init_followup_budget
 
@@ -182,11 +190,19 @@ class InterviewLangGraphAgent:
 
     async def submit_answer(self, candidate_id: str, answer_text: str) -> dict[str, Any]:
         """Resume after Whisper STT / typed answer — Agent 6 evaluates in parallel."""
+        import time
+
+        from agents.shared.latency_trace import record_event, record_ms
+
+        record_event("langgraph_start")
+        t0 = time.perf_counter()
         result = await ainvoke_graph(
             self.graph,
             Command(resume={"answer_text": answer_text}),
             config=self._config(candidate_id),
         )
+        record_ms("langgraph_ms", (time.perf_counter() - t0) * 1000.0)
+        record_event("langgraph_end")
         await self._maybe_run_agent7(candidate_id, result)
         return dict(result)
 
@@ -267,9 +283,23 @@ class InterviewLangGraphAgent:
         payload = dict(state or {})
         if str(payload.get("Status") or "") != "COMPLETED":
             return
+        history = list(payload.get("TurnHistory") or [])
+        # Score saved oral answers after the live interview (keeps turns fast).
+        try:
+            from core.config import get_settings
+            from services.interview_eval_queue import enqueue_deferred_turn_evaluations
+
+            if bool(getattr(get_settings(), "interview_defer_eval_until_end", True)):
+                enqueue_deferred_turn_evaluations(
+                    candidate_id=candidate_id,
+                    turn_history=history,
+                    context=dict(payload.get("EvaluationContext") or {}),
+                )
+        except Exception:
+            logger.warning("Deferred end-of-interview eval enqueue failed for %s", candidate_id, exc_info=True)
+
         extra: list[dict[str, Any]] = []
         evaluation = payload.get("LatestEvaluation")
-        history = list(payload.get("TurnHistory") or [])
         if evaluation and history:
             last = history[-1]
             question = last.get("question") or {}

@@ -1140,7 +1140,8 @@ sudo systemctl restart interview-proctor   # Proctor
 | Local Postgres on Interview-app       | Azure Database for PostgreSQL |
 | Recordings on Proctor local disk      | Data disk, then Blob          |
 | Vault **Interview-PRD-backup** on App | Also back up Proctor          |
-| Port 8030, `--workers 1`              | Redis / extra workers         |
+| Port 8030, `--workers 1` (required)   | Redis / extra uvicorn workers |
+| Phase 4 concurrency gates             | See `docs/PHASE4_CONCURRENCY_AND_AZURE.md` |
 
 
 **Do not**
