@@ -174,8 +174,11 @@ def oral_rules_message() -> str:
     return (
         "The multiple-choice section is complete. Now we begin the oral interview. "
         "I will ask you one question at a time. Please listen carefully, then answer "
-        "naturally using your microphone. When you stop speaking, your answer will be "
-        "captured automatically. At the end, I will share a brief overview of the role, "
+        "naturally using your microphone. You have up to three minutes for each answer, "
+        "and a timer on screen shows the time left. When thirty seconds remain, you will "
+        "see a reminder to wrap up. When time is up, just finish your sentence and your "
+        "answer will be saved. If you finish early, simply stop speaking and your answer "
+        "will be saved automatically. At the end, I will share a brief overview of the role, "
         "then you can ask about the role, department, or company. Let's begin."
     )
 

@@ -3822,7 +3822,7 @@ export function CandidatePage() {
                       )}
                       {(capturingAnswer || conversationState === 'listening') && (
                         <p className="meet-turn-hint">
-                          Take a moment to think. We wait 10 seconds for you to start speaking. If there is no answer, we ask once more, then move on.
+                          Take a moment to think. We wait 10 seconds for you to start speaking. If there is no answer, we ask once more, then move on. You have up to 3 minutes for each answer.
                         </p>
                       )}
                     </>
