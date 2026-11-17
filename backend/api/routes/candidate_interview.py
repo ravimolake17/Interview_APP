@@ -711,6 +711,34 @@ async def leave_room(
     updated = runtime_from_snapshot(candidate)
     can_rejoin = left_by == "candidate" and can_rejoin_room(updated)
     finalize_session = left_by == "candidate" and not can_rejoin
+    # Always queue unscored oral answers when the room ends (leave / hangup / HR end).
+    # claim_eval_job makes this safe if the candidate can still rejoin later.
+    if finalize_session or left_by == "hr" or next_state in {COMPLETED, ENDED}:
+        try:
+            from services.interview_eval_queue import enqueue_deferred_oral_evaluations_for_candidate
+            from services.interview_oral_store import oral_turns
+
+            queued = enqueue_deferred_oral_evaluations_for_candidate(
+                candidate.candidate_id,
+                oral_turns=oral_turns(candidate),
+                context={
+                    "job_position": candidate.job_position or "",
+                    "jd_text": (candidate.jd_text or "")[:4000],
+                    "full_name": candidate.full_name or "",
+                },
+            )
+            if queued:
+                logger.info(
+                    "Queued %s deferred oral evaluations after leave for %s",
+                    queued,
+                    candidate.candidate_id,
+                )
+        except Exception:
+            logger.warning(
+                "Deferred oral eval enqueue skipped after leave for %s",
+                candidate.candidate_id,
+                exc_info=True,
+            )
     if left_by == "candidate":
         try:
             from services.recommendation_agent_service import RecommendationAgentService

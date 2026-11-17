@@ -217,6 +217,46 @@ def mark_interview_completed_by_agent5_session(session, session_id: str) -> None
             ),
             {"cid": candidate_id},
         )
+        # Score any saved oral answers even when the session was terminated mid-interview.
+        try:
+            import json
+
+            from services.interview_eval_queue import enqueue_deferred_oral_evaluations_for_candidate
+
+            row = session.execute(
+                sql_text(
+                    "SELECT evaluation_snapshot, job_position, jd_text, full_name "
+                    "FROM candidate WHERE candidate_id = :cid LIMIT 1"
+                ),
+                {"cid": candidate_id},
+            ).mappings().first()
+            if row is not None:
+                snap = row.get("evaluation_snapshot") or {}
+                if isinstance(snap, str):
+                    snap = json.loads(snap or "{}")
+                oral = snap.get("interview_oral") if isinstance(snap, dict) else {}
+                turns = list((oral or {}).get("turns") or []) if isinstance(oral, dict) else []
+                queued = enqueue_deferred_oral_evaluations_for_candidate(
+                    candidate_id,
+                    oral_turns=turns,
+                    context={
+                        "job_position": row.get("job_position") or "",
+                        "jd_text": (row.get("jd_text") or "")[:4000],
+                        "full_name": row.get("full_name") or "",
+                    },
+                )
+                if queued:
+                    logger.info(
+                        "Queued %s deferred oral evaluations after Agent5 finalize for %s",
+                        queued,
+                        candidate_id,
+                    )
+        except Exception:
+            logger.warning(
+                "Deferred oral eval enqueue skipped after Agent5 finalize for %s",
+                candidate_id,
+                exc_info=True,
+            )
     except Exception:
         logger.exception(
             "Failed to mark interview completed for Agent 5 session %s", session_id

@@ -879,13 +879,21 @@ export function CandidatePage() {
       } catch {
         // Fall through to a generic access error when the session cannot be read.
       }
-      const expired = error instanceof ApiError && (error.status === 401 || error.status === 403)
+      const status = error instanceof ApiError ? error.status : 0
+      const expired = status === 401 || status === 403 || status === 410
+      const detail = errorMessage(error)
       setSessionGate('blocked')
       setAccessError({
-        title: expired ? 'This interview link is no longer valid' : 'Unable to open this interview',
+        title: status === 410
+          ? 'This interview link has expired'
+          : expired
+            ? 'This interview link is no longer valid'
+            : 'Unable to open this interview',
         text: expired
-          ? 'The join link has expired or this session is no longer available. Please contact HR for a new interview link.'
-          : errorMessage(error),
+          ? (detail && !/^request failed|^unable to/i.test(detail)
+            ? detail
+            : 'The join link has expired or this session is no longer available. Please contact HR for a new interview link.')
+          : detail,
       })
     }
   }, [showMessage])

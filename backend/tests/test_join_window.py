@@ -134,7 +134,7 @@ def test_rejoin_blocked_hours_or_days_later():
 
 def test_continuous_open_visit_not_killed_past_deadline():
     tz = ZoneInfo("Asia/Kolkata")
-    # Still in the room at 11:20 — do not end the meeting.
+    # Still in a live interview at 11:20 — do not end the meeting.
     assert_candidate_entry_allowed(
         scheduled_date=date(2026, 9, 24),
         scheduled_time=time(10, 0),
@@ -143,7 +143,24 @@ def test_continuous_open_visit_not_killed_past_deadline():
         now=datetime(2026, 9, 24, 11, 20, tzinfo=tz),
         first_started_at=datetime(2026, 9, 24, 10, 30, tzinfo=tz),
         room_visit_open=True,
+        session_status="active",
     )
+
+
+def test_stale_pre_interview_status_cannot_bypass_expired_window():
+    """Device-check / ready leftovers must not reopen an expired join link."""
+    tz = ZoneInfo("Asia/Kolkata")
+    with pytest.raises(HTTPException) as exc:
+        assert_candidate_entry_allowed(
+            scheduled_date=date(2026, 9, 24),
+            scheduled_time=time(10, 0),
+            duration_minutes=30,
+            tz_name="Asia/Kolkata",
+            now=datetime(2026, 9, 24, 12, 0, tzinfo=tz),
+            room_visit_open=True,
+            session_status="ready",
+        )
+    assert exc.value.status_code == 410
 
 
 def test_rejoin_closed_message():

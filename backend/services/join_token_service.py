@@ -94,19 +94,9 @@ def parse_runtime_datetime(value: object, *, tz_name: str | None = None) -> date
     return dt.astimezone(_company_tz(tz_name))
 
 
-_ACTIVE_SESSION_STATUSES = frozenset(
-    {
-        "ready",
-        "active",
-        "terminating",
-        "device_checked",
-        "face_enrolled",
-        "face_enrollment_pending",
-        "face_verified",
-        "voice_enrolled",
-        "initial_voice_verified",
-    }
-)
+# Only a live in-progress interview may overrun the join window.
+# Pre-interview statuses (devices / biometrics / ready) must not unlock an expired link.
+_LIVE_INTERVIEW_SESSION_STATUSES = frozenset({"active", "terminating"})
 
 
 def assert_candidate_entry_allowed(
@@ -123,9 +113,9 @@ def assert_candidate_entry_allowed(
     """Gate first join and rejoin without ending a continuous live session.
 
     Rules:
-    - Open room visit or active Agent5 session: always allow — interview may overrun.
+    - Live Agent5 session (active/terminating): always allow — interview may overrun.
     - Already started once, then left: allow until first_start + duration (+ grace).
-    - Never started: allow only in the scheduled join window.
+    - Never started / still on devices: allow only in the scheduled join window.
     """
     from fastapi import HTTPException
 
@@ -142,8 +132,11 @@ def assert_candidate_entry_allowed(
         clock = clock.replace(tzinfo=_company_tz(tz_name))
 
     status = str(session_status or "").strip().lower()
-    if room_visit_open or status in _ACTIVE_SESSION_STATUSES:
+    # Allow overrun only while the candidate is actually in a live interview.
+    # Stale room_visit_open / device-check / ready must not reopen an expired link.
+    if status in _LIVE_INTERVIEW_SESSION_STATUSES:
         return
+    _ = room_visit_open  # kept for call-site compatibility; not a bypass by itself
 
     if first_started_at is not None:
         started = first_started_at

@@ -38,6 +38,37 @@ def enqueue_answer_evaluation(job: dict[str, Any]) -> None:
     enqueue_eval_job(job)
 
 
+def _history_from_oral_turns(turns: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Normalize durable oral-turn rows into the TurnHistory shape used by enqueue."""
+    history: list[dict[str, Any]] = []
+    for turn in turns or []:
+        if not isinstance(turn, dict):
+            continue
+        question = dict(turn.get("question") or {})
+        if not question:
+            question = {
+                "id": turn.get("question_id"),
+                "question_text": turn.get("question_text"),
+                "skill_tags": list(turn.get("skill_tags") or []),
+                "is_followup": bool(turn.get("is_followup")),
+                "is_candidate_qna": bool(turn.get("candidate_qna") or turn.get("is_candidate_qna")),
+                "is_closing": bool(turn.get("is_closing")),
+                "category_id": turn.get("category_id"),
+            }
+        history.append(
+            {
+                "question": question,
+                "answer_text": turn.get("answer_text"),
+                "evaluation": turn.get("evaluation") if isinstance(turn.get("evaluation"), dict) else None,
+                "hr_skipped": turn.get("hr_skipped"),
+                "skipped_thin": turn.get("skipped_thin"),
+                "candidate_qna": turn.get("candidate_qna") or question.get("is_candidate_qna"),
+                "audio_path": turn.get("audio_path"),
+            }
+        )
+    return history
+
+
 def enqueue_deferred_turn_evaluations(
     *,
     candidate_id: str,
@@ -54,7 +85,8 @@ def enqueue_deferred_turn_evaluations(
             continue
         if turn.get("hr_skipped") or turn.get("skipped_thin") or turn.get("candidate_qna"):
             continue
-        if turn.get("evaluation"):
+        evaluation = turn.get("evaluation")
+        if isinstance(evaluation, dict) and evaluation:
             continue
         question = dict(turn.get("question") or {})
         if (
@@ -67,7 +99,11 @@ def enqueue_deferred_turn_evaluations(
         answer = str(turn.get("answer_text") or "").strip()
         if not answer or answer in {"[Skipped by HR]", "[No response]"}:
             continue
-        question_id = str(question.get("id") or "unknown")
+        question_id = str(question.get("id") or turn.get("question_id") or "unknown")
+        if not question.get("id"):
+            question["id"] = question_id
+        if not question.get("question_text"):
+            question["question_text"] = str(turn.get("question_text") or "")
         if not claim_eval_job(candidate_id, question_id, answer):
             continue
         enqueue_answer_evaluation(
@@ -89,6 +125,30 @@ def enqueue_deferred_turn_evaluations(
     if queued:
         logger.info("Queued %s deferred end-of-interview evaluations for %s", queued, candidate_id)
     return queued
+
+
+def enqueue_deferred_oral_evaluations_for_candidate(
+    candidate_id: str,
+    *,
+    oral_turns: list[dict[str, Any]] | None = None,
+    turn_history: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
+) -> int:
+    """Queue unscored oral answers for leave / terminate / incomplete interviews.
+
+    Pass durable ``interview_oral.turns`` (preferred) or LangGraph TurnHistory so
+    hangups and terminations still get Agent 6 scoring when Status never became
+    COMPLETED.
+    """
+    cid = str(candidate_id or "").strip()
+    if not cid:
+        return 0
+    history = _history_from_oral_turns(oral_turns) if oral_turns else list(turn_history or [])
+    return enqueue_deferred_turn_evaluations(
+        candidate_id=cid,
+        turn_history=history,
+        context=context,
+    )
 
 
 def eval_queue_stats() -> dict[str, int]:

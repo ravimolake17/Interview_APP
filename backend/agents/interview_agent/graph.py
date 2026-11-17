@@ -281,20 +281,31 @@ class InterviewLangGraphAgent:
 
     async def _maybe_run_agent7(self, candidate_id: str, state: Any) -> None:
         payload = dict(state or {})
-        if str(payload.get("Status") or "") != "COMPLETED":
+        status = str(payload.get("Status") or "")
+        if status not in {"COMPLETED", "ENDED"}:
             return
         history = list(payload.get("TurnHistory") or [])
         # Score saved oral answers after the live interview (keeps turns fast).
         try:
             from core.config import get_settings
-            from services.interview_eval_queue import enqueue_deferred_turn_evaluations
+            from services.interview_eval_queue import (
+                enqueue_deferred_oral_evaluations_for_candidate,
+                enqueue_deferred_turn_evaluations,
+            )
 
             if bool(getattr(get_settings(), "interview_defer_eval_until_end", True)):
-                enqueue_deferred_turn_evaluations(
+                queued = enqueue_deferred_turn_evaluations(
                     candidate_id=candidate_id,
                     turn_history=history,
                     context=dict(payload.get("EvaluationContext") or {}),
                 )
+                # Also cover durable oral turns if history was thin (hangup / partial).
+                if queued == 0:
+                    enqueue_deferred_oral_evaluations_for_candidate(
+                        candidate_id,
+                        turn_history=history,
+                        context=dict(payload.get("EvaluationContext") or {}),
+                    )
         except Exception:
             logger.warning("Deferred end-of-interview eval enqueue failed for %s", candidate_id, exc_info=True)
 

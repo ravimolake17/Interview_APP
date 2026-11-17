@@ -428,9 +428,39 @@ async def join_interview(
     # First-time joiners must use the link before scheduled end. Candidates who
     # already started once may rejoin until first_start + duration even if the
     # token's scheduled-end expiry has passed.
+    def _queue_unscored_oral_on_closed_link() -> None:
+        """If the link is closed but answers were already saved, still score them."""
+        try:
+            from services.interview_eval_queue import enqueue_deferred_oral_evaluations_for_candidate
+            from services.interview_oral_store import oral_turns
+
+            queued = enqueue_deferred_oral_evaluations_for_candidate(
+                candidate.candidate_id,
+                oral_turns=oral_turns(candidate),
+                context={
+                    "job_position": candidate.job_position or "",
+                    "jd_text": (candidate.jd_text or "")[:4000],
+                    "full_name": candidate.full_name or "",
+                },
+            )
+            if queued:
+                logger.info(
+                    "Queued %s deferred oral evaluations for closed join window candidate=%s",
+                    queued,
+                    candidate.candidate_id,
+                )
+        except Exception:
+            logger.warning(
+                "Deferred oral eval enqueue skipped on closed join for %s",
+                candidate.candidate_id,
+                exc_info=True,
+            )
+
     if expires_at is not None and not already_started:
         expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
         if trusted_utc_now() > expiry:
+            if participant_role == "candidate":
+                _queue_unscored_oral_on_closed_link()
             raise _join_http_error(410, "This interview link has expired.", company)
 
     if participant_role == "candidate":
@@ -453,6 +483,8 @@ async def join_interview(
                 ),
             )
         except HTTPException as exc:
+            if int(getattr(exc, "status_code", 0) or 0) in {403, 410}:
+                _queue_unscored_oral_on_closed_link()
             detail = exc.detail
             if isinstance(detail, dict):
                 detail = str(detail.get("message") or detail)
