@@ -16,6 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from agents.interview_agent.interview_language import language_from_snapshot
+
 from models.candidate import Candidate
 from models.interview import Interview, InterviewStatus
 
@@ -255,6 +257,7 @@ def register_room_join_sync(rr_candidate_id: str) -> dict[str, Any]:
             snapshot = dict(row[0])
         agent5 = dict(snapshot.get("agent5") or {})
         runtime = dict(agent5.get(RUNTIME_KEY) or {})
+        runtime.setdefault("interview_language", language_from_snapshot(snapshot))
         if bool(runtime.get("room_visit_open")):
             return runtime
         if room_join_count(runtime) >= MAX_ROOM_JOINS:
@@ -290,6 +293,7 @@ def persist_runtime(candidate: Candidate, runtime: dict[str, Any]) -> dict[str, 
     snapshot = dict(candidate.evaluation_snapshot or {})
     agent5 = dict(snapshot.get("agent5") or {})
     merged = dict(agent5.get(RUNTIME_KEY) or {})
+    merged.setdefault("interview_language", language_from_snapshot(snapshot))
     merged.update(runtime)
     merged["updated_at"] = _utcnow().isoformat()
     agent5[RUNTIME_KEY] = merged

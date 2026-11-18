@@ -11,7 +11,6 @@ import logging
 import time
 from collections.abc import Iterator
 from typing import Any
-from xml.sax.saxutils import escape as xml_escape
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +28,22 @@ def streaming_tts_available() -> bool:
     return bool(getattr(settings, "AZURE_SPEECH_KEY", None))
 
 
-def _azure_voice(voice: str | None, entry=None) -> str:
+def _azure_voice(voice: str | None, entry=None, language: str | None = None) -> str:
     from agents.interview_agent.tts_service import _neural_for_entry, _normalize_voice
 
-    return _neural_for_entry(entry, _normalize_voice(voice))
+    return _neural_for_entry(entry, _normalize_voice(voice), language=language)
 
 
 def synthesize_azure_mp3_stream(
     text: str,
     *,
     voice: str | None = "female",
+    language: str | None = None,
 ) -> Iterator[bytes]:
     """Yield MP3 chunks as Azure produces them (or as soon as the stream is readable)."""
     import azure.cognitiveservices.speech as speechsdk
 
+    from agents.interview_agent.interview_language import tts_voice_and_xml_lang
     from agents.interview_agent.tts_service import _humanize_script
     from agents.screening_agent.config import settings
     from agents.shared.azure_concurrency import azure_slot
@@ -60,7 +61,7 @@ def synthesize_azure_mp3_stream(
     region = (getattr(settings, "AZURE_SPEECH_REGION", None) or "eastus2").strip()
     endpoint = (getattr(settings, "AZURE_SPEECH_TTS_ENDPOINT", None) or "").strip().rstrip("/")
     entry = None
-    for item in ordered_targets("tts") or []:
+    for item in ordered_targets("tts", language=language) or []:
         if getattr(item, "provider", "") == "azure":
             entry = item
             region = (item.region or region).strip()
@@ -74,14 +75,13 @@ def synthesize_azure_mp3_stream(
         else:
             speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
         speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio16Khz128KBitRateMonoMp3
+            speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
         )
-        neural = _azure_voice(voice, entry)
-        ssml = (
-            f'<speak version="1.0" xml:lang="en-IN">'
-            f'<voice xml:lang="en-IN" name="{xml_escape(neural)}">{xml_escape(cleaned)}</voice>'
-            f"</speak>"
-        )
+        neural = _azure_voice(voice, entry, language=language)
+        xml_lang = tts_voice_and_xml_lang(language, voice)[1]
+        from agents.interview_agent.tts_service import build_interview_ssml
+
+        ssml = build_interview_ssml(cleaned, voice_name=neural, xml_lang=xml_lang)
 
         # audio_config=None → result stream only (no local speaker device).
         synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=None)

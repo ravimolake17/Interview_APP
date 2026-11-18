@@ -232,12 +232,20 @@ async def start_room_ai(
         company_name = await _company_display_name(db, candidate)
         from agents.shared.model_catalog import primary_interviewer_name
 
+        from agents.interview_agent.interview_language import language_from_snapshot
+
+        interview_language = language_from_snapshot(
+            candidate.evaluation_snapshot
+            if isinstance(candidate.evaluation_snapshot, dict)
+            else {}
+        )
         response.welcome_message = intro_message(
             first_name=first_name,
             company_name=company_name,
             role=candidate.job_position or "",
-            interviewer_name=primary_interviewer_name(),
+            interviewer_name=primary_interviewer_name(interview_language),
             company_intro=await _company_intro_spoken(db, candidate),
+            interview_language=interview_language,
         )
 
     return response
@@ -617,8 +625,16 @@ async def speak_room_text_stream(
     if not speak_text:
         raise HTTPException(status_code=404, detail="No text available to speak.")
 
+    from agents.interview_agent.interview_language import language_from_snapshot
+
+    interview_language = language_from_snapshot(
+        candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
+    )
+
     def _iter():
-        yield from synthesize_azure_mp3_stream(speak_text, voice=voice)
+        yield from synthesize_azure_mp3_stream(
+            speak_text, voice=voice, language=interview_language
+        )
 
     headers = stream_metrics_headers(
         {

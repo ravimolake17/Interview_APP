@@ -14,9 +14,14 @@ from agents.blueprint_agent.schemas import (
     HumanReadableReport,
     InputSummary,
     InterviewBlueprintResponse,
+    QuestionPlanSlot,
     TimeAllocation,
 )
-from agents.interview_agent.adaptive import generate_questions_with_llama
+from agents.interview_agent.adaptive import (
+    _call_llm_question_batch,
+    generate_adaptive_followups,
+    generate_questions_with_llama,
+)
 from agents.interview_agent.question_generator import is_spoken_interview_question
 
 
@@ -229,6 +234,68 @@ def test_agent4_prefers_llm_spoken_questions_from_plan():
     assert "motivated and research" not in joined
     assert "##" not in joined
     assert all(is_spoken_interview_question(q.question_text) for q in questions)
+
+
+def test_question_batch_prompt_locks_hindi_language():
+    slot = QuestionPlanSlot(
+        order=1,
+        category_id="skills_jd_keyword_questions",
+        category_name="Skills & JD Keyword-related Questions",
+        difficulty="medium",
+        skill="Python",
+        scenario_intent="Probe practical Python depth",
+    )
+    captured: dict[str, str] = {}
+
+    def _fake_llm(system, user, **kwargs):
+        captured["system"] = system
+        return {"questions": []}
+
+    with patch("agents.interview_agent.adaptive.call_llama_json", side_effect=_fake_llm):
+        _call_llm_question_batch(
+            [slot],
+            job_title="Software Engineer",
+            role_family="software",
+            resume_context={},
+            interview_language="hi",
+        )
+
+    prompt = captured["system"]
+    assert "LOCKED INTERVIEW LANGUAGE" in prompt
+    assert "Hindi written in Devanagari" in prompt
+    assert "never switch your own interview language away from Hindi" in prompt
+
+
+def test_adaptive_followup_uses_evaluation_context_language():
+    captured: dict[str, str] = {}
+
+    def _fake_llm(system, user, **kwargs):
+        captured["system"] = system
+        return {
+            "follow_ups": [
+                {
+                    "question_text": "आपने इस समस्या का मूल कारण कैसे पहचाना?",
+                    "reason": "तकनीकी गहराई",
+                    "difficulty": "medium",
+                }
+            ]
+        }
+
+    with (
+        patch("agents.interview_agent.adaptive.llama_available", return_value=True),
+        patch("agents.interview_agent.adaptive.call_llama_json", side_effect=_fake_llm),
+    ):
+        followups = generate_adaptive_followups(
+            question_id="q-1",
+            question_text="इस सेवा की latency आपने कैसे कम की?",
+            candidate_answer="मैंने profiling करके slow query पहचानी।",
+            evaluation={"score": 7, "gaps": ["root cause"]},
+            evaluation_context={"interview_language": "hi"},
+            max_followups=1,
+        )
+
+    assert followups[0].question_text == "आपने इस समस्या का मूल कारण कैसे पहचाना?"
+    assert "Hindi written in Devanagari" in captured["system"]
 
 
 def test_sanitize_strips_markdown_heading_and_vague_topics():

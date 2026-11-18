@@ -1,10 +1,10 @@
 """SMTP email service for interview notifications."""
 
-import base64
 import logging
 import smtplib
 import uuid
 from dataclasses import dataclass
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -18,6 +18,7 @@ TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "email"
 ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "frontend" / "src" / "assets"
 PARKON_LOGO = ASSETS_DIR / "Parkon_logo.png"
 KABEL_LOGO = ASSETS_DIR / "RR-Kabel-logo.png"
+LOGO_CID = "company-logo"
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,7 @@ class EmailService:
         *,
         from_name: str | None = None,
         smtp: SmtpRuntime | None = None,
+        logo_path: str | None = None,
     ) -> dict:
         runtime = self._runtime(smtp)
         if runtime is None:
@@ -115,7 +117,9 @@ class EmailService:
             return {"id": "dev-mode-message-id", "status": "logged"}
 
         sender_name = from_name or runtime.from_name
-        message = MIMEMultipart("alternative")
+        # related = HTML + inline logo (CID). Outlook renders CID far more
+        # reliably than data: URIs and respects the HTML width attribute.
+        message = MIMEMultipart("related")
         message["Subject"] = subject
         message["From"] = (
             f"{sender_name} <{runtime.from_email}>"
@@ -123,7 +127,19 @@ class EmailService:
             else runtime.from_email
         )
         message["To"] = to
-        message.attach(MIMEText(html_body, "html", "utf-8"))
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(html_body, "html", "utf-8"))
+        message.attach(alt)
+
+        path = Path(logo_path) if logo_path else PARKON_LOGO
+        if path.exists():
+            image = MIMEImage(path.read_bytes(), _subtype="png")
+            image.add_header("Content-ID", f"<{LOGO_CID}>")
+            image.add_header("Content-Disposition", "inline", filename=path.name)
+            message.attach(image)
+        else:
+            logger.warning("Logo not found at %s", path)
 
         try:
             if runtime.use_ssl:
@@ -155,14 +171,6 @@ class EmailService:
             logger.exception("SMTP send failed for to=%s", to)
             raise RuntimeError(f"Failed to send email: {exc}") from exc
 
-    def _get_logo_data_uri(self, logo_path: str | None = None) -> str:
-        path = Path(logo_path) if logo_path else PARKON_LOGO
-        if not path.exists():
-            logger.warning("Logo not found at %s", path)
-            return ""
-        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-        return f"data:image/png;base64,{encoded}"
-
     def send_congratulations_email(
         self,
         candidate_name: str,
@@ -181,7 +189,7 @@ class EmailService:
             scheduling_link=scheduling_link,
             job_position=job_position,
             company_name=brand["company_name"].upper(),
-            logo_data_uri=self._get_logo_data_uri(brand["logo_path"]),
+            logo_cid=LOGO_CID,
         )
         return self._send_message(
             to=candidate_email,
@@ -189,6 +197,7 @@ class EmailService:
             html_body=html,
             from_name=smtp.from_name if smtp and smtp.from_name else brand["from_name"],
             smtp=smtp,
+            logo_path=brand["logo_path"],
         )
 
     def send_confirmation_email(
@@ -213,7 +222,7 @@ class EmailService:
             join_link=join_link,
             job_position=job_position,
             company_name=brand["company_name"].upper(),
-            logo_data_uri=self._get_logo_data_uri(brand["logo_path"]),
+            logo_cid=LOGO_CID,
         )
         return self._send_message(
             to=candidate_email,
@@ -221,4 +230,5 @@ class EmailService:
             html_body=html,
             from_name=smtp.from_name if smtp and smtp.from_name else brand["from_name"],
             smtp=smtp,
+            logo_path=brand["logo_path"],
         )

@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { ChevronDown, Globe, KeyRound, Plus, Save, Trash2, X } from 'lucide-react';
 import { updateAIModelSettings } from '../../services/api';
 import ModelTestModal from './ModelTestModal';
-import TtsVoicePicker, { findTtsVoice, ttsGenderFromModelId } from './TtsVoicePicker';
+import TtsVoicePicker, {
+  findTtsVoice,
+  inferTtsLanguage,
+  ttsGenderFromModelId,
+} from './TtsVoicePicker';
 
 const GROQ_MODEL_REPLACEMENTS = {
   'llama-3.3-70b-versatile': 'openai/gpt-oss-120b',
@@ -30,13 +34,18 @@ function formFromAiModel(ai) {
     azure_speech_tts_endpoint: ai.azure_speech_tts_endpoint || '',
     chat_models: ai.chat_models || [],
     stt_models: ai.stt_models || [],
-    tts_models: ai.tts_models || [],
+    tts_models: (ai.tts_models || []).map((item) => ({
+      ...item,
+      language: inferTtsLanguage(item?.model_id, item?.language),
+    })),
     chat_primary_id: ai.chat_primary_id || '',
     chat_fallback_id: ai.chat_fallback_id || '',
     stt_primary_id: ai.stt_primary_id || '',
     stt_fallback_id: ai.stt_fallback_id || '',
     tts_primary_id: ai.tts_primary_id || '',
     tts_fallback_id: ai.tts_fallback_id || '',
+    tts_hi_primary_id: ai.tts_hi_primary_id || '',
+    tts_hi_fallback_id: ai.tts_hi_fallback_id || '',
   };
 }
 
@@ -51,6 +60,10 @@ function ttsVoiceOf(item) {
   return ttsGenderFromModelId(item?.model_id) || '';
 }
 
+function ttsLanguageOf(item) {
+  return inferTtsLanguage(item?.model_id, item?.language);
+}
+
 function ttsVoiceLabel(item) {
   const known = findTtsVoice(item?.model_id);
   if (known) return `${known.gender === 'male' ? 'Male' : 'Female'} · ${known.name}`;
@@ -62,12 +75,22 @@ function ttsVoiceLabel(item) {
 
 function emptyDraft(kind) {
   if (kind === 'chat') {
-    return { name: '', provider: 'azure', model_id: 'gpt-4o', endpoint: '', api_version: '2024-10-21', region: '', enabled: true, voice: '' };
+    return { name: '', provider: 'azure', model_id: 'gpt-4o', endpoint: '', api_version: '2024-10-21', region: '', enabled: true, voice: '', language: '' };
   }
   if (kind === 'stt') {
-    return { name: '', provider: 'azure', model_id: 'azure-speech', endpoint: '', api_version: '', region: 'eastus2', enabled: true, voice: '' };
+    return { name: '', provider: 'azure', model_id: 'azure-speech', endpoint: '', api_version: '', region: 'eastus2', enabled: true, voice: '', language: '' };
   }
-  return { name: '', provider: 'azure', model_id: 'en-IN-NeerjaNeural', endpoint: '', api_version: '', region: 'eastus2', enabled: true, voice: 'female' };
+  return {
+    name: '',
+    provider: '',
+    model_id: '',
+    endpoint: '',
+    api_version: '',
+    region: 'eastus2',
+    enabled: true,
+    voice: '',
+    language: '',
+  };
 }
 
 function providerOptions(kind) {
@@ -89,6 +112,46 @@ function providerOptions(kind) {
   ];
 }
 
+function PreferenceSelect({ label, value, options, excludeId, onChange }) {
+  const visible = options.filter((item) => item.id !== excludeId);
+  // Keep the current value visible even if language filter/options briefly disagree.
+  const selected = options.find((item) => item.id === value)
+    || visible.find((item) => item.id === value);
+  const rows = selected && !visible.some((item) => item.id === selected.id)
+    ? [selected, ...visible]
+    : visible;
+  return (
+    <div>
+      <label className={labelCls}>{label}</label>
+      <select
+        className={inputCls}
+        value={value || ''}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (typeof onChange === 'function') onChange(next);
+        }}
+      >
+        <option value="">{label.toLowerCase().includes('fallback') ? 'None' : 'Select model'}</option>
+        {rows.map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.name} ({item.model_id}){item.enabled === false ? ' — off' : ''}
+          </option>
+        ))}
+      </select>
+      {value && !rows.some((item) => item.id === value) && (
+        <p className="text-[11px] text-amber-700 mt-1">
+          Selected model is missing from this language list. Pick Reena/Abhishek again.
+        </p>
+      )}
+      {!rows.length && (
+        <p className="text-[11px] text-muted mt-1">
+          No models in this language yet. Add a Hindi TTS voice below, then select it here.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ModelLane({
   title,
   hint,
@@ -96,10 +159,14 @@ function ModelLane({
   models,
   primaryId,
   fallbackId,
+  hiPrimaryId,
+  hiFallbackId,
   draft,
   onDraft,
   onPrimary,
   onFallback,
+  onHiPrimary,
+  onHiFallback,
   onAdd,
   onUpdate,
   onRemove,
@@ -109,6 +176,11 @@ function ModelLane({
   const [showAdd, setShowAdd] = useState(false);
   const [adding, setAdding] = useState(false);
   const addLabel = `Add ${title.replace(/s$/, '').toLowerCase()}`;
+  const englishModels = kind === 'tts' ? models.filter((item) => ttsLanguageOf(item) === 'en') : models;
+  const hindiModels = kind === 'tts' ? models.filter((item) => ttsLanguageOf(item) === 'hi') : [];
+  const draftLanguage = draft.language === 'hi' || draft.language === 'en' ? draft.language : '';
+  const draftProvider = draft.provider || '';
+  const canPickVoice = kind === 'tts' && Boolean(draftProvider) && Boolean(draftLanguage);
 
   const submitAdd = async () => {
     if (adding) return;
@@ -127,30 +199,62 @@ function ModelLane({
         <h3 className="font-semibold text-col">{title}</h3>
         <p className="text-xs text-muted mt-0.5">{hint}</p>
       </div>
-      <div className="grid sm:grid-cols-2 gap-3">
-        <div>
-          <label className={labelCls}>First preference</label>
-          <select className={inputCls} value={primaryId || ''} onChange={(e) => onPrimary(e.target.value)}>
-            <option value="">Select model</option>
-            {models.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} ({item.model_id}){item.enabled === false ? ' — off' : ''}
-              </option>
-            ))}
-          </select>
+      {kind === 'tts' ? (
+        <div className="space-y-3">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted mb-2">English interview</p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <PreferenceSelect
+                label="First preference"
+                value={primaryId}
+                options={englishModels}
+                onChange={onPrimary}
+              />
+              <PreferenceSelect
+                label="Fallback (traffic / server error)"
+                value={fallbackId}
+                options={englishModels}
+                excludeId={primaryId}
+                onChange={onFallback}
+              />
+            </div>
+          </div>
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wider text-muted mb-2">Hindi interview</p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <PreferenceSelect
+                label="First preference"
+                value={hiPrimaryId}
+                options={hindiModels}
+                onChange={onHiPrimary}
+              />
+              <PreferenceSelect
+                label="Fallback (traffic / server error)"
+                value={hiFallbackId}
+                options={hindiModels}
+                excludeId={hiPrimaryId}
+                onChange={onHiFallback}
+              />
+            </div>
+          </div>
         </div>
-        <div>
-          <label className={labelCls}>Fallback (traffic / server error)</label>
-          <select className={inputCls} value={fallbackId || ''} onChange={(e) => onFallback(e.target.value)}>
-            <option value="">None</option>
-            {models.filter((item) => item.id !== primaryId).map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name} ({item.model_id}){item.enabled === false ? ' — off' : ''}
-              </option>
-            ))}
-          </select>
+      ) : (
+        <div className="grid sm:grid-cols-2 gap-3">
+          <PreferenceSelect
+            label="First preference"
+            value={primaryId}
+            options={models}
+            onChange={onPrimary}
+          />
+          <PreferenceSelect
+            label="Fallback (traffic / server error)"
+            value={fallbackId}
+            options={models}
+            excludeId={primaryId}
+            onChange={onFallback}
+          />
         </div>
-      </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -158,6 +262,7 @@ function ModelLane({
               <th className="py-2 pr-2">Model</th>
               <th className="py-2 pr-2">Provider</th>
               <th className="py-2 pr-2">ID / deployment</th>
+              {kind === 'tts' && <th className="py-2 pr-2">Language</th>}
               {kind === 'tts' && <th className="py-2 pr-2">Voice</th>}
               <th className="py-2 pr-2">On</th>
               <th className="py-2"> </th>
@@ -178,6 +283,11 @@ function ModelLane({
                 </td>
                 <td className="py-2 pr-2 text-muted">{item.provider}</td>
                 <td className="py-2 pr-2 text-muted truncate max-w-[180px]">{item.model_id}</td>
+                {kind === 'tts' && (
+                  <td className="py-2 pr-2 text-muted">
+                    {ttsLanguageOf(item) === 'hi' ? 'Hindi' : 'English'}
+                  </td>
+                )}
                 {kind === 'tts' && (
                   <td className="py-2 pr-2">
                     <button
@@ -205,7 +315,7 @@ function ModelLane({
             ))}
             {models.length === 0 && (
               <tr>
-                <td colSpan={kind === 'tts' ? 6 : 5} className="py-3 text-sm text-muted">No models yet. Add one below.</td>
+                <td colSpan={kind === 'tts' ? 7 : 5} className="py-3 text-sm text-muted">No models yet. Add one below.</td>
               </tr>
             )}
           </tbody>
@@ -216,15 +326,23 @@ function ModelLane({
           {(() => {
             const editing = models.find((row) => row.id === voiceEditorId);
             if (!editing) return null;
+            const editingLanguage = ttsLanguageOf(editing);
             return (
               <div className="space-y-2 rounded-xl border border-col p-3 bg-orange-50/40">
-                <p className="text-xs font-semibold text-col">Change voice for {editing.name}</p>
+                <p className="text-xs font-semibold text-col">
+                  Change {editingLanguage === 'hi' ? 'Hindi' : 'English'} voice for {editing.name}
+                </p>
                 <TtsVoicePicker
                   provider={editing.provider}
+                  language={editingLanguage}
                   modelId={editing.model_id}
                   voice={ttsVoiceOf(editing)}
-                  onSelect={({ model_id, voice: nextVoice }) => {
-                    onUpdate(editing.id, { model_id, voice: nextVoice });
+                  onSelect={({ model_id, voice: nextVoice, language: nextLanguage }) => {
+                    onUpdate(editing.id, {
+                      model_id,
+                      voice: nextVoice,
+                      language: nextLanguage || editingLanguage,
+                    });
                     setVoiceEditorId(null);
                   }}
                 />
@@ -272,32 +390,71 @@ function ModelLane({
           </div>
           <div>
             <label className={labelCls}>Provider</label>
-            <select className={inputCls} value={draft.provider} onChange={(e) => onDraft({ ...draft, provider: e.target.value })}>
+            <select
+              className={inputCls}
+              value={draftProvider}
+              onChange={(e) => onDraft({
+                ...draft,
+                provider: e.target.value,
+                model_id: '',
+                voice: '',
+              })}
+            >
+              {kind === 'tts' && <option value="">Select provider</option>}
               {providerOptions(kind).map((item) => (
                 <option key={item.value} value={item.value}>{item.label}</option>
               ))}
             </select>
           </div>
           {kind === 'tts' ? (
-            <div className="sm:col-span-2">
-              <label className={labelCls}>Voice</label>
-              <p className="text-[11px] text-muted mb-2">
-                Pick a category, then female or male, then a voice. Use Run to hear it before saving.
-              </p>
-              <TtsVoicePicker
-                provider={draft.provider}
-                modelId={draft.model_id}
-                voice={draft.voice || 'female'}
-                onSelect={({ model_id, voice: nextVoice, name }) => {
-                  onDraft({
+            <>
+              <div>
+                <label className={labelCls}>Language</label>
+                <select
+                  className={inputCls}
+                  value={draftLanguage}
+                  onChange={(e) => onDraft({
                     ...draft,
-                    model_id,
-                    voice: nextVoice,
-                    name: draft.name?.trim() ? draft.name : name,
-                  });
-                }}
-              />
-            </div>
+                    language: e.target.value,
+                    model_id: '',
+                    voice: '',
+                  })}
+                >
+                  <option value="">Select language</option>
+                  <option value="en">English</option>
+                  <option value="hi">Hindi</option>
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className={labelCls}>Voice</label>
+                {!canPickVoice ? (
+                  <p className="text-[11px] text-muted mt-1">
+                    Select provider and language first. Voices then show only for that combination.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-muted mb-2">
+                      Pick a category, then female or male, then a {draftLanguage === 'hi' ? 'Hindi' : 'English'} voice. Use Run to hear it before saving.
+                    </p>
+                    <TtsVoicePicker
+                      provider={draftProvider}
+                      language={draftLanguage}
+                      modelId={draft.model_id}
+                      voice={draft.voice || 'female'}
+                      onSelect={({ model_id, voice: nextVoice, name, language: nextLanguage }) => {
+                        onDraft({
+                          ...draft,
+                          model_id,
+                          voice: nextVoice,
+                          language: nextLanguage || draftLanguage,
+                          name: draft.name?.trim() ? draft.name : name,
+                        });
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            </>
           ) : (
             <div>
               <label className={labelCls}>{kind === 'chat' && draft.provider === 'azure' ? 'Deployment name' : 'Model ID'}</label>
@@ -366,12 +523,36 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (aiModel) setLlmForm(formFromAiModel(aiModel));
+    if (aiModel) applyAiModel(aiModel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync when SuperAdmin reloads system bundle
   }, [aiModel]);
 
-  const applyAiModel = (ai) => {
+  // If Hindi voices exist but preference was never saved (or wiped by old API), default to first Hindi model.
+  useEffect(() => {
+    const hindi = (llmForm.tts_models || []).filter((item) => ttsLanguageOf(item) === 'hi');
+    if (!hindi.length) return;
+    if (llmForm.tts_hi_primary_id && hindi.some((item) => item.id === llmForm.tts_hi_primary_id)) {
+      return;
+    }
+    const firstId = hindi[0].id;
+    setLlmForm((prev) => ({ ...prev, tts_hi_primary_id: firstId }));
+  }, [llmForm.tts_models, llmForm.tts_hi_primary_id]);
+
+  const applyAiModel = (ai, { keepLocalHiPrefs = false } = {}) => {
     if (!ai) return;
-    setLlmForm(formFromAiModel(ai));
+    setLlmForm((prev) => {
+      const next = formFromAiModel(ai);
+      // Old backend processes (no --reload) may omit new Hindi preference fields
+      // and wipe the dropdown after save — keep the optimistic local choice.
+      if (
+        keepLocalHiPrefs
+        || !Object.prototype.hasOwnProperty.call(ai, 'tts_hi_primary_id')
+      ) {
+        if (prev.tts_hi_primary_id) next.tts_hi_primary_id = prev.tts_hi_primary_id;
+        if (prev.tts_hi_fallback_id) next.tts_hi_fallback_id = prev.tts_hi_fallback_id;
+      }
+      return next;
+    });
   };
 
   const llmPayload = (form) => ({
@@ -380,13 +561,30 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
     max_tokens: Number(form.max_tokens),
     chat_models: form.chat_models || [],
     stt_models: form.stt_models || [],
-    tts_models: form.tts_models || [],
+    tts_models: (form.tts_models || []).map((item) => ({
+      ...item,
+      language: inferTtsLanguage(item?.model_id, item?.language),
+    })),
+    tts_hi_primary_id: form.tts_hi_primary_id || '',
+    tts_hi_fallback_id: form.tts_hi_fallback_id || '',
   });
 
   const persistLlm = async (form, successMessage) => {
-    const { data } = await updateAIModelSettings(llmPayload(form));
-    applyAiModel(data);
-    onMessage?.(successMessage);
+    const payload = llmPayload(form);
+    const { data } = await updateAIModelSettings(payload);
+    // If the API echoed Hindi prefs, trust it; otherwise keep what we just saved.
+    const serverHasHi = data && Object.prototype.hasOwnProperty.call(data, 'tts_hi_primary_id');
+    const serverLostHi = serverHasHi
+      && payload.tts_hi_primary_id
+      && !data.tts_hi_primary_id;
+    applyAiModel(data, { keepLocalHiPrefs: serverLostHi || !serverHasHi });
+    if (serverLostHi || !serverHasHi) {
+      onMessage?.(
+        `${successMessage} Restart the API server (uvicorn) so Hindi TTS preferences persist.`,
+      );
+    } else {
+      onMessage?.(successMessage);
+    }
     return data;
   };
 
@@ -394,7 +592,13 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
     const name = String(draft.name || '').trim();
     const modelId = String(draft.model_id || '').trim();
     if (!name || !modelId) {
-      onError?.('Enter a display name and model / deployment ID.');
+      onError?.(kind === 'tts'
+        ? 'Enter a display name and pick a voice after provider + language.'
+        : 'Enter a display name and model / deployment ID.');
+      return false;
+    }
+    if (kind === 'tts' && (!draft.provider || (draft.language !== 'en' && draft.language !== 'hi'))) {
+      onError?.('Select provider and language before saving a TTS model.');
       return false;
     }
     const key = `${kind}_models`;
@@ -403,6 +607,7 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
       : kind === 'stt'
         ? llmForm.azure_speech_stt_endpoint
         : llmForm.azure_speech_tts_endpoint;
+    const language = kind === 'tts' ? inferTtsLanguage(modelId, draft.language) : '';
     const entry = {
       id: catalogId(kind, draft.provider, modelId),
       name,
@@ -414,11 +619,20 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
       api_version: draft.api_version || (kind === 'chat' ? llmForm.azure_openai_api_version : '') || '',
       region: draft.region || llmForm.azure_speech_region || '',
       voice: kind === 'tts' ? (draft.voice || 'female') : '',
+      language,
     };
     const models = [...(llmForm[key] || []), entry];
-    const primaryKey = `${kind}_primary_id`;
     const next = { ...llmForm, [key]: models };
-    if (!llmForm[primaryKey]) next[primaryKey] = entry.id;
+    if (kind === 'tts') {
+      if (language === 'hi') {
+        if (!llmForm.tts_hi_primary_id) next.tts_hi_primary_id = entry.id;
+      } else if (!llmForm.tts_primary_id) {
+        next.tts_primary_id = entry.id;
+      }
+    } else {
+      const primaryKey = `${kind}_primary_id`;
+      if (!llmForm[primaryKey]) next[primaryKey] = entry.id;
+    }
     onError?.(null);
     setLlmForm(next);
     resetDraft(emptyDraft(kind));
@@ -464,9 +678,17 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
     const next = {
       ...llmForm,
       [key]: models,
-      [primaryKey]: llmForm[primaryKey] === id ? (models[0]?.id || '') : llmForm[primaryKey],
+      [primaryKey]: llmForm[primaryKey] === id
+        ? (models.find((item) => kind !== 'tts' || ttsLanguageOf(item) === 'en')?.id || '')
+        : llmForm[primaryKey],
       [fallbackKey]: llmForm[fallbackKey] === id ? '' : llmForm[fallbackKey],
     };
+    if (kind === 'tts') {
+      next.tts_hi_primary_id = llmForm.tts_hi_primary_id === id
+        ? (models.find((item) => ttsLanguageOf(item) === 'hi')?.id || '')
+        : llmForm.tts_hi_primary_id;
+      next.tts_hi_fallback_id = llmForm.tts_hi_fallback_id === id ? '' : llmForm.tts_hi_fallback_id;
+    }
     setLlmForm(next);
     setSaving(true);
     onError?.(null);
@@ -480,9 +702,10 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
     }
   };
 
-  const savePreference = async (kind, role, value) => {
-    const primaryKey = `${kind}_primary_id`;
-    const fallbackKey = `${kind}_fallback_id`;
+  const savePreference = async (kind, role, value, language = 'en') => {
+    const isHiTts = kind === 'tts' && language === 'hi';
+    const primaryKey = isHiTts ? 'tts_hi_primary_id' : `${kind}_primary_id`;
+    const fallbackKey = isHiTts ? 'tts_hi_fallback_id' : `${kind}_fallback_id`;
     const prev = llmForm;
     const next = { ...llmForm };
     if (role === 'primary') {
@@ -494,7 +717,15 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
     const models = llmForm[`${kind}_models`] || [];
     const selected = models.find((item) => item.id === value);
     const label = role === 'primary' ? 'First preference' : 'Fallback';
-    const kindLabel = kind === 'chat' ? 'Chat' : kind === 'stt' ? 'STT' : 'TTS';
+    const kindLabel = kind === 'chat'
+      ? 'Chat'
+      : kind === 'stt'
+        ? 'STT'
+        : isHiTts
+          ? 'Hindi TTS'
+          : kind === 'tts'
+            ? 'English TTS'
+            : 'TTS';
     setLlmForm(next);
     setSaving(true);
     onError?.(null);
@@ -597,15 +828,19 @@ export default function LlmCatalogTab({ aiModel, integration, onMessage, onError
         />
         <ModelLane
           title="Text-to-speech"
-          hint="Used to speak interview questions to the candidate (Agent 4). Display name is the interviewer identity (Reena, Anuj). Voice is female or male Indian English."
+          hint="Used to speak interview questions (Agent 4). Set English and Hindi first preference + fallback separately. Display name is the interviewer identity (Reena, Anuj)."
           kind="tts"
           models={llmForm.tts_models || []}
           primaryId={llmForm.tts_primary_id}
           fallbackId={llmForm.tts_fallback_id}
+          hiPrimaryId={llmForm.tts_hi_primary_id}
+          hiFallbackId={llmForm.tts_hi_fallback_id}
           draft={ttsDraft}
           onDraft={setTtsDraft}
-          onPrimary={(value) => savePreference('tts', 'primary', value)}
-          onFallback={(value) => savePreference('tts', 'fallback', value)}
+          onPrimary={(value) => savePreference('tts', 'primary', value, 'en')}
+          onFallback={(value) => savePreference('tts', 'fallback', value, 'en')}
+          onHiPrimary={(value) => savePreference('tts', 'primary', value, 'hi')}
+          onHiFallback={(value) => savePreference('tts', 'fallback', value, 'hi')}
           onAdd={() => addCatalogModel('tts', ttsDraft, setTtsDraft)}
           onUpdate={(id, patch) => updateCatalogModel('tts', id, patch)}
           onRemove={(id) => removeCatalogModel('tts', id)}

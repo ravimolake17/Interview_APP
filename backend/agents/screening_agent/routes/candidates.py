@@ -96,6 +96,7 @@ async def _run_sync_evaluation(
         jd_original_filename=payload.jd_original_filename,
         jd_file_url=payload.jd_file_url,
         company_id=company_id,
+        interview_language=payload.interview_language,
     )
     evaluation.saved_candidate_id = saved_candidate.candidate_id
     evaluation.persist_warning = persist_warning
@@ -113,6 +114,7 @@ async def _run_sync_evaluation(
                 jd_original_filename=payload.jd_original_filename,
                 jd_file_url=payload.jd_file_url,
                 company_id=company_id,
+                interview_language=payload.interview_language,
             )
             evaluation.scheduling = scheduling
             invite_sent = scheduling is not None

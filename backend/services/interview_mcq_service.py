@@ -144,12 +144,20 @@ async def _planned_minutes(db: AsyncSession, candidate: Candidate) -> int:
 
 
 def _messages(record: dict[str, Any]) -> dict[str, str]:
+    from agents.interview_agent.interview_language import normalize_interview_language
+
     minutes = max(1, int(round(int(record.get("duration_seconds") or 300) / 60)))
     count = len([q for q in (record.get("questions") or []) if isinstance(q, dict)])
+    language = normalize_interview_language(record.get("interview_language"))
     return {
         "intro_message": str(record.get("intro_message") or ""),
-        "rules_message": str(record.get("rules_message") or mcq_rules_message(minutes=minutes, count=count or 8)),
-        "oral_rules_message": str(record.get("oral_rules_message") or oral_rules_message()),
+        "rules_message": str(
+            record.get("rules_message")
+            or mcq_rules_message(minutes=minutes, count=count or 8, interview_language=language)
+        ),
+        "oral_rules_message": str(
+            record.get("oral_rules_message") or oral_rules_message(interview_language=language)
+        ),
     }
 
 
@@ -164,7 +172,7 @@ def public_state(record: dict[str, Any] | None, *, include_results: bool = False
             "current_question": None,
             "intro_message": "",
             "rules_message": "",
-            "oral_rules_message": oral_rules_message(),
+            "oral_rules_message": oral_rules_message(interview_language="en"),
         }
     questions = [q for q in (record.get("questions") or []) if isinstance(q, dict)]
     index = max(0, min(int(record.get("current_index") or 0), len(questions)))
@@ -229,11 +237,15 @@ async def ensure_mcq(
     count = mcq_question_count(minutes)
     duration = mcq_duration_seconds(minutes)
     snap = candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
+    from agents.interview_agent.interview_language import language_from_snapshot
+
+    interview_language = language_from_snapshot(snap)
     resume_context = build_candidate_context(
         jd_text=candidate.jd_text,
         evaluation_snapshot=snap,
         job_position=candidate.job_position,
     )
+    resume_context["interview_language"] = interview_language
     # LLM generation is sync/blocking — never run on the FastAPI event loop.
     t0 = time.perf_counter()
     questions = await asyncio.to_thread(
@@ -242,6 +254,7 @@ async def ensure_mcq(
         job_title=candidate.job_position,
         resume_context=resume_context,
         seed=candidate.candidate_id,
+        interview_language=interview_language,
     )
     logger.info(
         "MCQ generation finished candidate=%s questions=%s elapsed_ms=%.0f",
@@ -257,15 +270,21 @@ async def ensure_mcq(
         "started_at": None,
         "completed_at": None,
         "current_index": 0,
+        "interview_language": interview_language,
         "intro_message": intro_message(
             first_name=first_name,
             company_name=company,
             role=candidate.job_position or "",
-            interviewer_name=primary_interviewer_name(),
+            interviewer_name=primary_interviewer_name(interview_language),
             company_intro=await _company_intro_spoken(db, candidate),
+            interview_language=interview_language,
         ),
-        "rules_message": mcq_rules_message(minutes=max(1, round(duration / 60)), count=len(questions)),
-        "oral_rules_message": oral_rules_message(),
+        "rules_message": mcq_rules_message(
+            minutes=max(1, round(duration / 60)),
+            count=len(questions),
+            interview_language=interview_language,
+        ),
+        "oral_rules_message": oral_rules_message(interview_language=interview_language),
         "questions": questions,
     }
     await _save(db, candidate, record)

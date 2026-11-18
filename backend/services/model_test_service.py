@@ -71,14 +71,25 @@ def _test_chat(entry, prompt: str) -> CatalogModelTestResponse:
 
 def _test_tts(entry, prompt: str) -> CatalogModelTestResponse:
     from agents.interview_agent.tts_service import synthesize_speech_for_entry
+    from agents.shared.model_catalog import entry_language
 
     persona = interviewer_display_name(entry) or entry.name
     gender = voice_for_entry(entry)
-    accent = "Indian English"
-    spoken = prompt or (
-        f"Hello. I am {persona}. I speak with a clear {accent} "
-        f"{'female' if gender == 'female' else 'male'} voice."
-    )
+    lang = entry_language(entry)
+    if prompt and str(prompt).strip():
+        spoken = str(prompt).strip()
+    elif lang == "hi":
+        spoken = (
+            f"नमस्ते। मैं {persona} हूँ। मैं स्पष्ट हिंदी "
+            f"{'पुरुष' if gender == 'male' else 'महिला'} आवाज़ में बोलता हूँ।"
+            if gender == "male"
+            else f"नमस्ते। मैं {persona} हूँ। मैं स्पष्ट हिंदी महिला आवाज़ में बोलती हूँ।"
+        )
+    else:
+        spoken = (
+            f"Hello. I am {persona}. I speak with a clear Indian English "
+            f"{'female' if gender == 'female' else 'male'} voice."
+        )
     result = synthesize_speech_for_entry(entry, spoken)
     data = _base_response(entry, kind="tts", catalog_id=entry.id)
     data["text"] = result.get("text") or spoken
@@ -102,6 +113,9 @@ def preview_tts_voice(
     gender = "male" if str(voice).strip().lower() == "male" else "female"
     short_name = str(model_id or "").split(":")[0].split("-")[-1] or "Voice"
     short_name = short_name.replace("Neural", "").replace("Indic", "") or "Voice"
+    from agents.shared.model_catalog import infer_tts_language
+
+    lang = infer_tts_language(model_id)
     entry = AICatalogEntry(
         id="preview-tts",
         name=short_name,
@@ -110,11 +124,17 @@ def preview_tts_voice(
         model_id=model_id,
         enabled=True,
         voice=gender,
+        language=lang,
     )
-    spoken = prompt or (
-        f"Hello. This is the {short_name} Indian English "
-        f"{gender} voice for interview questions."
-    )
+    if lang == "hi":
+        spoken = prompt or (
+            f"नमस्ते। यह {short_name} हिंदी {gender} आवाज़ इंटरव्यू प्रश्नों के लिए है।"
+        )
+    else:
+        spoken = prompt or (
+            f"Hello. This is the {short_name} Indian English "
+            f"{gender} voice for interview questions."
+        )
     result = synthesize_speech_for_entry(entry, spoken)
     data = _base_response(entry, kind="tts", catalog_id="preview-tts")
     data["text"] = result.get("text") or spoken

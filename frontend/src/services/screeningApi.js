@@ -44,6 +44,7 @@ export async function enqueueResumeExtract(file, jdPayload, jdText, options = {}
   form.append('file', file);
   appendJdFields(form, jdPayload, jdText);
   form.append('send_invite_email', options.sendInviteEmail === false ? 'false' : 'true');
+  form.append('interview_language', options.interviewLanguage === 'hi' ? 'hi' : 'en');
   try {
     const { data } = await screeningClient.post('/extract/async', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
@@ -150,6 +151,7 @@ export async function runBatchScreening({
   selectedJob,
   preparedJd,
   sendInviteEmail = true,
+  interviewLanguage = 'en',
   onProgress,
 }) {
   let jdPayload = preparedJd || null;
@@ -187,6 +189,7 @@ export async function runBatchScreening({
     try {
       const queued = await enqueueResumeExtract(resumeFile, jdPayload, jdText, {
         sendInviteEmail,
+        interviewLanguage,
       });
       queuedExtracts.push({ jobId: queued.job_id, fileName: resumeFile.name });
     } catch (error) {

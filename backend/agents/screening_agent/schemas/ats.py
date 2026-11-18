@@ -463,6 +463,15 @@ class CandidateEvaluateRequest(BaseModel):
     audit_context: dict | None = None
     company_id: int | None = None
     send_invite_email: bool = True
+    interview_language: Literal["en", "hi"] = "en"
+
+    @field_validator("interview_language", mode="before")
+    @classmethod
+    def normalize_language(cls, value: object) -> str:
+        raw = str(value or "en").strip().casefold()
+        if raw in {"hi", "hi-in", "hindi", "हिंदी"}:
+            return "hi"
+        return "en"
 
     @model_validator(mode="after")
     def validate_jd_input(self) -> "CandidateEvaluateRequest":

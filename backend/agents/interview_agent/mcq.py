@@ -7,6 +7,10 @@ import random
 import re
 from typing import Any
 
+from agents.interview_agent.interview_language import (
+    normalize_interview_language,
+    prompt_language_instruction,
+)
 from agents.shared.llama_client import call_llama_json, llama_available
 
 logger = logging.getLogger(__name__)
@@ -160,7 +164,15 @@ def mcq_question_count(planned_minutes: int | None) -> int:
     return 10 if planned >= 45 else 8
 
 
-def mcq_rules_message(*, minutes: int, count: int) -> str:
+def mcq_rules_message(*, minutes: int, count: int, interview_language: str | None = None) -> str:
+    if normalize_interview_language(interview_language) == "hi":
+        return (
+            f"मौखिक इंटरव्यू से पहले आप एक छोटा बहुविकल्पीय परीक्षण देंगे। "
+            f"एक समय में एक प्रश्न दिखेगा। विकल्प चुनते ही उत्तर लॉक हो जाएगा — "
+            f"आप वापस जाकर बदल नहीं सकते। अनिश्चित होने पर प्रश्न छोड़ सकते हैं। "
+            f"आपके पास लगभग {minutes} मिनट में {count} प्रश्न हैं। "
+            "परीक्षण पूरा होने या समय समाप्त होने पर मौखिक इंटरव्यू शुरू होगा।"
+        )
     return (
         f"Before the spoken interview, you will take a short multiple-choice test. "
         f"You will see one question at a time. Select an option to lock your answer — "
@@ -170,7 +182,18 @@ def mcq_rules_message(*, minutes: int, count: int) -> str:
     )
 
 
-def oral_rules_message() -> str:
+def oral_rules_message(*, interview_language: str | None = None) -> str:
+    if normalize_interview_language(interview_language) == "hi":
+        return (
+            "बहुविकल्पीय भाग पूरा हो चुका है। अब मौखिक इंटरव्यू शुरू करते हैं। "
+            "मैं एक समय में एक प्रश्न पूछूँगा। ध्यान से सुनें, फिर माइक्रोफ़ोन से "
+            "स्वाभाविक रूप से उत्तर दें। प्रत्येक उत्तर के लिए अधिकतम तीन मिनट हैं, "
+            "और स्क्रीन पर शेष समय दिखेगा। तीस सेकंड बाकी होने पर आपको सारांश करने "
+            "की याद दिलाई जाएगी। समय पूरा होने पर अपना वाक्य समाप्त करें और उत्तर "
+            "सेव हो जाएगा। जल्दी समाप्त होने पर बोलना बंद करें — उत्तर अपने आप सेव "
+            "हो जाएगा। अंत में मैं भूमिका का संक्षिप्त परिचय दूँगा, फिर आप भूमिका, "
+            "विभाग या कंपनी के बारे में पूछ सकते हैं। चलिए शुरू करते हैं।"
+        )
     return (
         "The multiple-choice section is complete. Now we begin the oral interview. "
         "I will ask you one question at a time. Please listen carefully, then answer "
@@ -190,17 +213,37 @@ def intro_message(
     role: str,
     interviewer_name: str = "",
     company_intro: str = "",
+    interview_language: str | None = None,
 ) -> str:
     name = first_name.strip() or "there"
     company = company_name.strip() or "RR Parkon"
-    role_phrase = f" for the {role.strip()} position" if role.strip() else ""
     persona = interviewer_name.strip()
+    language = normalize_interview_language(interview_language)
+    about = (company_intro or "").strip()
+    if language == "hi":
+        role_phrase = f" {role.strip()} पद के लिए" if role.strip() else ""
+        who = (
+            f"मैं {persona} हूँ, आज की AI इंटरव्यूअर{role_phrase}।"
+            if persona
+            else f"मैं आज की AI इंटरव्यूअर हूँ{role_phrase}।"
+        )
+        if not about:
+            about = (
+                f"{company} RR Global का हिस्सा है। "
+                "हम बुद्धिमान भर्ती और एंटरप्राइज़ सॉफ़्टवेयर समाधान बनाते हैं।"
+            )
+        return (
+            f"नमस्ते {name}, {company} में आपका स्वागत है। "
+            f"{who} "
+            f"{about} "
+            "यह इंटरव्यू गोपनीय है और हर उम्मीदवार के लिए निष्पक्षता सुनिश्चित करने हेतु मॉनिटर किया जाता है।"
+        )
+    role_phrase = f" for the {role.strip()} position" if role.strip() else ""
     who = (
         f"I'm {persona}, your AI interviewer today{role_phrase}."
         if persona
         else f"I'm your AI interviewer today{role_phrase}."
     )
-    about = (company_intro or "").strip()
     if not about:
         about = (
             f"{company} is part of RR Global. "
@@ -338,12 +381,16 @@ def generate_mcq_questions(
     job_title: str | None = None,
     resume_context: dict[str, str] | None = None,
     seed: str | None = None,
+    interview_language: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return 8–10 four-option MCQs. Never raises: LLM first, then a local bank."""
     rng = random.Random(seed or "mcq")
     target = max(8, min(10, int(count or 8)))
     skills = _skills_from_context(resume_context, job_title)
     ctx = resume_context or {}
+    language = normalize_interview_language(
+        interview_language or ctx.get("interview_language")
+    )
     questions: list[dict[str, Any]] = []
 
     if llama_available():
@@ -353,6 +400,8 @@ def generate_mcq_questions(
             "Each question has exactly 4 concise options and one clearly correct answer. "
             "Do not use trick wording, code-golf, or multi-select. "
             "Keep each question under 40 words. "
+            f"{prompt_language_instruction(language)} "
+            "Write question_text and every option in the locked interview language. "
             'Return JSON: {"questions":[{"question_text":"...","options":["...","...","...","..."],'
             '"correct_index":0,"skill":"..."}]}'
         )

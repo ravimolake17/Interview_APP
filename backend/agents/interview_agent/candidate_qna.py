@@ -6,6 +6,10 @@ import logging
 import re
 from typing import Any
 
+from agents.interview_agent.interview_language import (
+    normalize_interview_language,
+    prompt_language_instruction,
+)
 from agents.shared.llama_client import call_llama_json, llama_available
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,32 @@ _UNKNOWN_REPLY = (
     "I don't have that information to share in this interview. "
     "HR can follow up with those details after we wrap up. "
     "If you have a question about the role or next steps, I'm happy to help."
+)
+
+_HINDI_QNA_OPENING = (
+    "मेरे इंटरव्यू के प्रश्न पूरे हुए। आप भूमिका या अगले चरणों के बारे में एक छोटा "
+    "प्रश्न पूछ सकते हैं, या बता सकते हैं कि आपके कोई प्रश्न नहीं हैं।"
+)
+
+_HINDI_CLOSING_THANK_YOU = (
+    "आज समय देने के लिए धन्यवाद। हमारी टीम अगले चरणों के बारे में आपसे संपर्क करेगी। "
+    "आपको शुभकामनाएँ।"
+)
+
+_HINDI_WRAP_UP_REPLY = (
+    "आपके प्रश्नों के लिए धन्यवाद। आज की बातचीत यहीं समाप्त होती है। "
+    "HR अगले चरणों की जानकारी साझा करेगा। नमस्कार।"
+)
+
+_HINDI_DECLINE_REPLY = (
+    "मैं इस इंटरव्यू में उस विषय पर चर्चा नहीं कर सकता। भूमिका या भर्ती प्रक्रिया से "
+    "जुड़े प्रश्न में मैं आपकी सहायता कर सकता हूँ।"
+)
+
+_HINDI_UNKNOWN_REPLY = (
+    "मेरे पास इस इंटरव्यू में साझा करने के लिए वह जानकारी नहीं है। बातचीत पूरी होने के "
+    "बाद HR इसकी जानकारी दे सकता है। भूमिका या अगले चरणों से जुड़े प्रश्न में मैं आपकी "
+    "सहायता कर सकता हूँ।"
 )
 
 _HARD_UNKNOWN = re.compile(
@@ -104,17 +134,43 @@ hacking, confidential internals, or cheating. Decline briefly and close.
 """
 
 
-def build_qna_opening(*, role_summary: str = "") -> str:
+def _localized_qna_text(interview_language: Any) -> dict[str, str]:
+    if normalize_interview_language(interview_language) == "hi":
+        return {
+            "opening": _HINDI_QNA_OPENING,
+            "closing": _HINDI_CLOSING_THANK_YOU,
+            "wrap_up": _HINDI_WRAP_UP_REPLY,
+            "decline": _HINDI_DECLINE_REPLY,
+            "unknown": _HINDI_UNKNOWN_REPLY,
+        }
+    return {
+        "opening": QNA_OPENING,
+        "closing": CLOSING_THANK_YOU,
+        "wrap_up": _WRAP_UP_REPLY,
+        "decline": _DECLINE_REPLY,
+        "unknown": _UNKNOWN_REPLY,
+    }
+
+
+def closing_thank_you(*, interview_language: Any = "en") -> str:
+    return _localized_qna_text(interview_language)["closing"]
+
+
+def build_qna_opening(*, role_summary: str = "", interview_language: Any = "en") -> str:
     """End-of-questions opener; includes a short role overview when available."""
+    language = normalize_interview_language(interview_language)
+    texts = _localized_qna_text(language)
     summary = (role_summary or "").strip()
-    if summary:
+    if summary and language == "en":
         # Keep spoken opening short — long overviews burn TTS and invite long Q&A.
         brief = summary if len(summary) <= 280 else f"{summary[:277].rstrip()}..."
         return (
             f"Those were my interview questions. Briefly about the role: {brief} "
             "You may ask one short question about the role or next steps, or say you are done."
         )
-    return QNA_OPENING
+    # Role summaries are commonly stored in English; do not leak them into a
+    # Hindi-locked candidate-facing turn.
+    return texts["opening"]
 
 
 def is_closing_utterance(text: str) -> bool:
@@ -218,24 +274,31 @@ def generate_candidate_qna_reply(
     department_name: str = "",
     company_intro: str = "",
     prior_answers: list[str] | None = None,
+    interview_language: Any = "en",
 ) -> dict[str, Any]:
     """Classify the candidate utterance and return a short spoken reply."""
+    language = normalize_interview_language(interview_language)
+    texts = _localized_qna_text(language)
     text = (candidate_text or "").strip()
     # Last allowed turn, farewell, or a repeat → close without more chat.
     if is_closing_utterance(text) or turn >= MAX_QNA_TURNS:
-        return {"closing": True, "allowed": True, "reply": CLOSING_THANK_YOU}
+        return {"closing": True, "allowed": True, "reply": texts["closing"]}
     if looks_repeated_qna(text, prior_answers):
-        return {"closing": True, "allowed": True, "reply": _WRAP_UP_REPLY}
+        return {"closing": True, "allowed": True, "reply": texts["wrap_up"]}
 
     if looks_controversial(text):
-        return {"closing": True, "allowed": False, "reply": f"{_DECLINE_REPLY} {_WRAP_UP_REPLY}"}
+        return {
+            "closing": True,
+            "allowed": False,
+            "reply": f"{texts['decline']} {texts['wrap_up']}",
+        }
 
     if _HARD_UNKNOWN.search(text) or looks_unknown_internal(text):
         # One short unknown reply, then end — avoid multi-turn salary/next-step loops.
         return {
             "closing": True,
             "allowed": True,
-            "reply": f"{_UNKNOWN_REPLY} {_WRAP_UP_REPLY}",
+            "reply": f"{texts['unknown']} {texts['wrap_up']}",
         }
 
     refs = _reference_block(
@@ -246,26 +309,31 @@ def generate_candidate_qna_reply(
     )
 
     # Prefer free template answers from JD/dept/company briefs before calling the LLM.
-    brief_reply = _fallback_from_briefs(
-        text,
-        role_summary=role_summary,
-        department_brief=department_brief,
-        company_intro=company_intro,
+    brief_reply = (
+        _fallback_from_briefs(
+            text,
+            role_summary=role_summary,
+            department_brief=department_brief,
+            company_intro=company_intro,
+        )
+        if language == "en"
+        else None
     )
     if brief_reply:
         closing = turn >= MAX_QNA_TURNS - 1
-        reply = brief_reply if not closing else f"{brief_reply} {_WRAP_UP_REPLY}"
+        reply = brief_reply if not closing else f"{brief_reply} {texts['wrap_up']}"
         return {"closing": closing, "allowed": True, "reply": reply}
 
     if llama_available():
         try:
             data = call_llama_json(
-                _QNA_SYSTEM,
+                f"{_QNA_SYSTEM}\n\nLANGUAGE LOCK:\n{prompt_language_instruction(language)}",
                 (
                     f"Job position: {job_position or 'the open role'}\n"
                     f"Q&A turn: {turn} of {MAX_QNA_TURNS} — close after this if possible\n"
                     f"REFERENCE TEXTS:\n{refs}\n\n"
-                    f"Candidate said: {text}"
+                    f"Candidate said: {text}\n\n"
+                    "The candidate's language must not change the locked reply language."
                 ),
                 temperature=0.2,
                 max_tokens=180,
@@ -274,15 +342,15 @@ def generate_candidate_qna_reply(
             allowed = bool(data.get("allowed", True))
             reply = str(data.get("reply") or "").strip()
             if not allowed:
-                reply = reply or _DECLINE_REPLY
+                reply = reply or texts["decline"]
                 closing = True
             if closing:
-                reply = reply or CLOSING_THANK_YOU
+                reply = reply or texts["closing"]
             if not reply:
-                reply = _WRAP_UP_REPLY
+                reply = texts["wrap_up"]
                 closing = True
             if _HARD_UNKNOWN.search(text):
-                reply = f"{_UNKNOWN_REPLY} {_WRAP_UP_REPLY}"
+                reply = f"{texts['unknown']} {texts['wrap_up']}"
                 closing = True
             return {"closing": closing, "allowed": allowed, "reply": reply}
         except Exception:
@@ -291,5 +359,5 @@ def generate_candidate_qna_reply(
     return {
         "closing": True,
         "allowed": True,
-        "reply": _WRAP_UP_REPLY,
+        "reply": texts["wrap_up"],
     }

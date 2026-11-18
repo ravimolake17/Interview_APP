@@ -216,11 +216,15 @@ class InterviewAgentService:
                     exc_info=True,
                 )
         snap = candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
+        from agents.interview_agent.interview_language import language_from_snapshot
+
+        interview_language = language_from_snapshot(snap)
         resume_context = build_candidate_context(
             jd_text=candidate.jd_text,
             evaluation_snapshot=snap,
             job_position=candidate.job_position or blueprint_row.job_title,
         )
+        resume_context["interview_language"] = interview_language
         # LLM-primary from question_plan; HR can still add/edit/delete the saved bank.
         # The live interview always uses the latest questions_json (final paper).
         questions = generate_questions_with_llama(
@@ -228,6 +232,7 @@ class InterviewAgentService:
             job_title=blueprint_row.job_title or candidate.job_position,
             resume_context=resume_context,
             candidate_level=blueprint_row.candidate_level,
+            interview_language=interview_language,
         )
         if not questions:
             raise ValueError("Could not generate questions from the blueprint.")
@@ -538,10 +543,19 @@ class InterviewAgentService:
 
         # Azure Speech REST + deterministic/LLM correction are blocking — keep the
         # FastAPI event loop free via a bounded STT thread pool.
+        from agents.interview_agent.interview_language import (
+            azure_stt_locale,
+            language_from_snapshot,
+        )
+
+        interview_language = language_from_snapshot(
+            candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
+        )
         result = await run_stt_blocking(
             transcribe_audio_bytes,
             content,
             filename=filename,
+            language=azure_stt_locale(interview_language),
             whisper_prompt=stt_bundle.get("whisper_prompt"),
             prior_text=prior_text,
             partial=partial,
@@ -600,10 +614,16 @@ class InterviewAgentService:
         # Live Q&A / closing prompts are not in the stored question bank.
         skip_question_cache = bool(question_id and str(question_id).startswith("qna-"))
 
+        from agents.interview_agent.interview_language import language_from_snapshot
+
+        interview_language = language_from_snapshot(
+            candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
+        )
+
         if not voice:
             from agents.shared.model_catalog import ordered_targets, voice_for_entry
 
-            targets = ordered_targets("tts")
+            targets = ordered_targets("tts", language=interview_language)
             if targets:
                 voice = voice_for_entry(targets[0])
             else:
@@ -686,7 +706,12 @@ class InterviewAgentService:
             raise ValueError("No question text or cached audio available to speak.")
 
         # Live synthesis fallback — run off the event loop.
-        result = await asyncio.to_thread(synthesize_speech, text, voice=voice)
+        result = await asyncio.to_thread(
+            synthesize_speech,
+            text,
+            voice=voice,
+            language=interview_language,
+        )
         result["cached"] = False
         # Warm caches for follow-ups / repeated asks.
         if question_id and not skip_question_cache:

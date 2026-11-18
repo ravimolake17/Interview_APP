@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Mic, Square } from 'lucide-react';
 import { testCatalogModel, testCatalogStt } from '../../services/api';
+import { inferTtsLanguage } from './TtsVoicePicker';
 
 function errorText(err) {
   const detail = err?.response?.data?.detail;
@@ -24,7 +25,16 @@ export default function ModelTestModal({ model, onClose }) {
     if (model.kind === 'tts') {
       const persona = model.name || 'the interviewer';
       const gender = model.voice === 'male' ? 'male' : 'female';
-      setPrompt(`Hello. I am ${persona}. I speak with a clear Indian English ${gender} voice.`);
+      const language = inferTtsLanguage(model.model_id, model.language);
+      if (language === 'hi') {
+        setPrompt(
+          gender === 'male'
+            ? `नमस्ते। मैं ${persona} हूँ। मैं स्पष्ट हिंदी पुरुष आवाज़ में बोलता हूँ।`
+            : `नमस्ते। मैं ${persona} हूँ। मैं स्पष्ट हिंदी महिला आवाज़ में बोलती हूँ।`,
+        );
+      } else {
+        setPrompt(`Hello. I am ${persona}. I speak with a clear Indian English ${gender} voice.`);
+      }
     } else if (model.kind === 'chat') {
       setPrompt('Reply with one short sentence confirming you are ready for interviews.');
     } else {
@@ -42,6 +52,11 @@ export default function ModelTestModal({ model, onClose }) {
   }, [model]);
 
   if (!model) return null;
+
+  const ttsLanguage = model.kind === 'tts'
+    ? inferTtsLanguage(model.model_id, model.language)
+    : 'en';
+  const ttsAccentLabel = ttsLanguage === 'hi' ? 'Hindi' : 'Indian English';
 
   const playAudio = (base64, contentType) => {
     if (audioRef.current) URL.revokeObjectURL(audioRef.current);
@@ -133,7 +148,7 @@ export default function ModelTestModal({ model, onClose }) {
           <h2 className="text-base font-semibold">{title}</h2>
           <p className="text-xs text-orange-50 mt-0.5">
             {model.provider} · {model.model_id}
-            {model.kind === 'tts' && model.voice ? ` · ${model.voice} Indian English` : ''}
+            {model.kind === 'tts' && model.voice ? ` · ${model.voice} ${ttsAccentLabel}` : ''}
           </p>
         </div>
         <div className="px-5 py-4 space-y-3">

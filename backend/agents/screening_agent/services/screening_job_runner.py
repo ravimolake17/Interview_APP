@@ -119,6 +119,7 @@ async def execute_extract_job(db: AsyncSession, job: ScreeningJob, payload: dict
             ),
             company_id=payload.get("company_id") or job.company_id,
             send_invite_email=bool(payload.get("send_invite_email", True)),
+            interview_language=payload.get("interview_language", "en"),
         )
         scoring_job_id = await ScreeningQueueService(db).enqueue(
             evaluate, company_id=evaluate.company_id
@@ -172,6 +173,7 @@ async def execute_evaluate_job(db: AsyncSession, job: ScreeningJob, payload: Can
         jd_original_filename=payload.jd_original_filename,
         jd_file_url=payload.jd_file_url,
         company_id=company_id,
+        interview_language=payload.interview_language,
     )
     evaluation.saved_candidate_id = saved_candidate.candidate_id
     evaluation.persist_warning = persist_warning
@@ -188,6 +190,7 @@ async def execute_evaluate_job(db: AsyncSession, job: ScreeningJob, payload: Can
                 jd_original_filename=payload.jd_original_filename,
                 jd_file_url=payload.jd_file_url,
                 company_id=company_id,
+                interview_language=payload.interview_language,
             )
             evaluation.scheduling = scheduling
         except ValueError as exc:

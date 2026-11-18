@@ -286,6 +286,13 @@ async def _persist_and_maybe_followup(job: dict[str, Any], eval_dict: dict[str, 
     loop = asyncio.get_running_loop()
 
     def _build():
+        from agents.interview_agent.interview_language import language_from_snapshot
+
+        snap = (
+            candidate.evaluation_snapshot
+            if isinstance(getattr(candidate, "evaluation_snapshot", None), dict)
+            else {}
+        )
         return generate_adaptive_followups(
             question_id=str(question.get("id") or "unknown"),
             question_text=str(question.get("question_text") or ""),
@@ -295,6 +302,8 @@ async def _persist_and_maybe_followup(job: dict[str, Any], eval_dict: dict[str, 
             max_followups=1,
             already_asked=prior,
             candidate_level=level,
+            interview_language=language_from_snapshot(snap),
+            evaluation_context=snap,
         )
 
     followups = await loop.run_in_executor(None, _build)

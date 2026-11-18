@@ -28,6 +28,7 @@ export default function Screening() {
   const [step, setStep] = useState(0);
   const [sendInviteEmail, setSendInviteEmail] = useState(true);
   const [storeJd, setStoreJd] = useState(true);
+  const [interviewLanguage, setInterviewLanguage] = useState('en');
   const [uploaderKey, setUploaderKey] = useState(0);
 
   const savedJobs = useMemo(
@@ -89,6 +90,7 @@ export default function Screening() {
         jdText: jdMode === 'paste' ? jdText.trim() : '',
         selectedJob: jdMode === 'saved' ? selectedJob : null,
         sendInviteEmail,
+      interviewLanguage,
       storeJd: jdMode !== 'saved' && storeJd,
       jdMode,
     });
@@ -105,6 +107,7 @@ export default function Screening() {
     setJdMode('saved');
     setSendInviteEmail(true);
     setStoreJd(true);
+    setInterviewLanguage('en');
     setUploaderKey((key) => key + 1);
   }, [
     jdMode,
@@ -115,6 +118,7 @@ export default function Screening() {
     selectedJob,
     storeJd,
     sendInviteEmail,
+    interviewLanguage,
     enqueueScreeningJob,
     addToast,
   ]);
@@ -126,6 +130,7 @@ export default function Screening() {
     setSelectedJobId('');
     setJdMode('saved');
     setResumeFiles([]);
+    setInterviewLanguage('en');
     setUploaderKey((key) => key + 1);
     setScreeningResults([]);
   };
@@ -332,6 +337,28 @@ export default function Screening() {
                     </span>
                   </span>
                 </label>
+                <fieldset className="mt-4 text-sm text-white">
+                  <legend className="font-semibold">Interview language</legend>
+                  <div className="mt-2 flex flex-wrap gap-4">
+                    {[
+                      { value: 'en', label: 'English' },
+                      { value: 'hi', label: 'Hindi' },
+                    ].map(({ value, label }) => (
+                      <label key={value} className="inline-flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={interviewLanguage === value}
+                          onChange={() => setInterviewLanguage(value)}
+                          className="h-4 w-4 rounded border-white/40 accent-white"
+                        />
+                        <span>{label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <span className="block text-xs text-orange-100 mt-1">
+                    Applies to all candidates in this batch and stays fixed throughout the interview.
+                  </span>
+                </fieldset>
               </div>
               <button
                 onClick={handleStartScreening}

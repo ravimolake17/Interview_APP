@@ -294,6 +294,9 @@ export default function ScreeningQueuePanel() {
                                     ? 'Uploaded JD'
                                     : 'Pasted JD'}
                               </span>
+                              <span className="inline-flex items-center rounded-full bg-white dark:bg-slate-900 border border-col px-2 py-0.5 text-[10px] text-muted">
+                                {job.interviewLanguage === 'hi' ? 'Hindi' : 'English'}
+                              </span>
                               {(job.status === 'completed' || job.status === 'failed') && (
                                 <span className="inline-flex items-center gap-1 rounded-full bg-white dark:bg-slate-900 border border-col px-2 py-0.5 text-[10px] text-orange-600">
                                   <Eye size={10} /> Preview

@@ -201,6 +201,7 @@ export function ScreeningQueueProvider({ children }) {
       label: payload.label || 'Screening job',
       resumeCount: resumeFiles.length,
       sendInviteEmail: payload.sendInviteEmail !== false,
+      interviewLanguage: payload.interviewLanguage === 'hi' ? 'hi' : 'en',
       storeJd: Boolean(payload.storeJd),
       jdMode: payload.jdMode || 'saved',
       status: 'queued',
@@ -333,6 +334,7 @@ export function ScreeningQueueProvider({ children }) {
           selectedJob: selectedJob || job.selectedJob,
           preparedJd,
           sendInviteEmail: job.sendInviteEmail,
+          interviewLanguage: job.interviewLanguage,
           onProgress: (current, total, name, stage) => {
             const label =
               stage === 'scoring'
@@ -347,7 +349,7 @@ export function ScreeningQueueProvider({ children }) {
         });
 
         const mapped = batch.results.map(({ extraction, result }, index) =>
-          mapEvaluationToScreeningResult(result, extraction, index),
+          mapEvaluationToScreeningResult(result, extraction, index, job.interviewLanguage),
         );
 
         const failures = batch.failures || [];

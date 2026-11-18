@@ -7,6 +7,8 @@ import uuid
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from agents.interview_agent.interview_language import normalize_interview_language
 from sqlalchemy.orm.attributes import flag_modified
 
 from agents.scheduler_agent.graph import SchedulerAgent
@@ -239,8 +241,10 @@ def _extract_phone(evaluation: EvaluationResponse) -> str | None:
 def _build_evaluation_snapshot(
     evaluation: EvaluationResponse,
     parsed_resume: ParsedResume | None = None,
+    interview_language: str = "en",
 ) -> dict[str, Any]:
     snapshot = evaluation.model_dump(mode="json")
+    snapshot["interview_language"] = normalize_interview_language(interview_language)
     if parsed_resume is not None:
         snapshot["resume_text"] = parsed_resume.source_text
         snapshot["parsed_resume"] = parsed_resume.model_dump(mode="json")
@@ -400,6 +404,7 @@ async def save_screening_evaluation(
     jd_original_filename: str | None = None,
     jd_file_url: str | None = None,
     company_id: int | None = None,
+    interview_language: str = "en",
 ) -> tuple[Candidate, str | None]:
     """Persist every screening result so HR can review all candidates."""
     if company_id is None:
@@ -426,7 +431,11 @@ async def save_screening_evaluation(
 
     email, persist_warning = _resolve_contact_email(evaluation, existing)
     status = DECISION_TO_STATUS[evaluation.shortlist_status]
-    snapshot = _build_evaluation_snapshot(evaluation, parsed_resume)
+    snapshot = _build_evaluation_snapshot(
+        evaluation,
+        parsed_resume,
+        interview_language=interview_language,
+    )
     full_name = (evaluation.candidate_details.name or "Candidate").strip() or "Candidate"
     if (
         existing
@@ -605,6 +614,7 @@ async def save_and_schedule_shortlisted(
     jd_original_filename: str | None = None,
     jd_file_url: str | None = None,
     company_id: int | None = None,
+    interview_language: str = "en",
 ) -> SchedulingInfo:
     """
     Persist a shortlisted candidate and start the LangGraph scheduler workflow.
@@ -620,6 +630,7 @@ async def save_and_schedule_shortlisted(
         jd_original_filename=jd_original_filename,
         jd_file_url=jd_file_url,
         company_id=company_id,
+        interview_language=interview_language,
     )
     if await has_booked_slot(db, candidate.candidate_id):
         candidate.status = CandidateStatus.INTERVIEW_SCHEDULED

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agents.evaluation_agent.evaluator import build_candidate_context
 from agents.interview_agent import nodes
 from agents.interview_agent.state import InterviewAgentState
+from agents.interview_agent.interview_language import language_from_snapshot
 from agents.shared.llama_client import llama_model_id
 from core.langgraph_runtime import aget_graph_state, ainvoke_graph, get_checkpointer, thread_config
 from services.interview_agent_service import InterviewAgentService
@@ -134,6 +135,7 @@ class InterviewLangGraphAgent:
                 "department_brief": briefs.get("department_brief") or "",
                 "role_summary": briefs.get("role_summary") or "",
                 "candidate_level": str(level or "").strip(),
+                "interview_language": language_from_snapshot(snap),
             }
         )
         return context

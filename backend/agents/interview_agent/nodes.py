@@ -17,7 +17,6 @@ from agents.interview_agent.followup_generator import (
     should_treat_as_unanswered,
 )
 from agents.interview_agent.candidate_qna import (
-    CLOSING_THANK_YOU,
     MAX_QNA_TURNS,
     build_qna_opening,
     generate_candidate_qna_reply,
@@ -97,7 +96,17 @@ def load_session(state: InterviewAgentState) -> dict[str, Any]:
 
 def _qna_opening_from_state(state: InterviewAgentState) -> str:
     ctx = state.get("EvaluationContext") or {}
-    return build_qna_opening(role_summary=str(ctx.get("role_summary") or ""))
+    return build_qna_opening(
+        role_summary=str(ctx.get("role_summary") or ""),
+        interview_language=ctx.get("interview_language"),
+    )
+
+
+def _closing_thank_you_from_state(state: InterviewAgentState) -> str:
+    from agents.interview_agent.candidate_qna import closing_thank_you
+
+    ctx = state.get("EvaluationContext") or {}
+    return closing_thank_you(interview_language=ctx.get("interview_language"))
 
 
 def present_question(state: InterviewAgentState) -> dict[str, Any]:
@@ -130,7 +139,9 @@ def present_question(state: InterviewAgentState) -> dict[str, Any]:
             }
         return {
             "Status": "COMPLETED",
-            "CurrentQuestion": qna_prompt_question(CLOSING_THANK_YOU, turn=turns, closing=True),
+            "CurrentQuestion": qna_prompt_question(
+                _closing_thank_you_from_state(state), turn=turns, closing=True
+            ),
             "RemainingQuestions": 0,
             "PendingFollowUpMode": False,
             "InterviewPhase": "DONE",
@@ -257,7 +268,9 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
         history = list(state.get("TurnHistory") or [])
         turns = int(state.get("CandidateQnaTurns") or 0) + 1
         if answer == "__HR_SKIP__" or hr_action in {"skip", "next", "goto"}:
-            closing = qna_prompt_question(CLOSING_THANK_YOU, turn=turns, closing=True)
+            closing = qna_prompt_question(
+                _closing_thank_you_from_state(state), turn=turns, closing=True
+            )
             history.append(
                 {
                     "question": question,
@@ -296,6 +309,7 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             department_name=str(ctx.get("department_name") or ""),
             company_intro=str(ctx.get("company_intro") or ""),
             prior_answers=prior_qna,
+            interview_language=ctx.get("interview_language"),
         )
         history.append(
             {
@@ -311,7 +325,7 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
             return {
                 "TurnHistory": history,
                 "CurrentQuestion": qna_prompt_question(
-                    str(result.get("reply") or CLOSING_THANK_YOU),
+                    str(result.get("reply") or _closing_thank_you_from_state(state)),
                     turn=turns,
                     closing=True,
                 ),
@@ -598,7 +612,9 @@ async def process_answer_parallel(state: InterviewAgentState) -> dict[str, Any]:
 def complete_session(state: InterviewAgentState) -> dict[str, Any]:
     current = state.get("CurrentQuestion") or {}
     keep = current if current.get("is_closing") else qna_prompt_question(
-        CLOSING_THANK_YOU, turn=int(state.get("CandidateQnaTurns") or 0), closing=True
+        _closing_thank_you_from_state(state),
+        turn=int(state.get("CandidateQnaTurns") or 0),
+        closing=True,
     )
     return {
         "Status": "COMPLETED",

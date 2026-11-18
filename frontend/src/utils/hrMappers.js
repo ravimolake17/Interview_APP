@@ -346,6 +346,7 @@ export function mapCandidateFromBackend(candidate, detail = null) {
     scheduledTime: detail?.scheduled_time ?? candidate.scheduled_time ?? null,
     meetingLink: detail?.meeting_link ?? candidate.meeting_link ?? null,
     joinLink: detail?.join_link ?? snapshot?.agent5?.join_link ?? null,
+    interviewLanguage: snapshot.interview_language === 'hi' ? 'hi' : 'en',
     calendarEventId: detail?.calendar_event_id ?? candidate.calendar_event_id ?? null,
     evaluationSnapshot: snapshot,
   };
@@ -424,7 +425,12 @@ function formatExperienceEntry(entry = {}) {
   return `${role}${company}${dates}${type}${years}${reason}`;
 }
 
-export function mapEvaluationToScreeningResult(evaluation, extraction, index = 0) {
+export function mapEvaluationToScreeningResult(
+  evaluation,
+  extraction,
+  index = 0,
+  interviewLanguage = 'en',
+) {
   const candidate = evaluation.candidate_details || {};
   const breakdown = evaluation.score_breakdown || {};
   const experienceAssessment =
@@ -536,5 +542,6 @@ export function mapEvaluationToScreeningResult(evaluation, extraction, index = 0
     preferredMatchRatio: Math.round(Number(match.preferred_match_ratio || 0) * 100),
     scheduling: evaluation.scheduling || null,
     resumeFileUrl: extraction?.stored_file_url || null,
+    interviewLanguage: interviewLanguage === 'hi' ? 'hi' : 'en',
   };
 }

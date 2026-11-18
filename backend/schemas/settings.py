@@ -55,8 +55,10 @@ class AICatalogEntry(BaseModel):
     region: str = Field(default="", max_length=64)
     enabled: bool = True
     voice: Literal["", "female", "male"] = ""
+    # Interview speak language for TTS rows. Empty = infer from model_id (hi-IN → hi).
+    language: Literal["", "en", "hi"] = ""
 
-    @field_validator("id", "name", "model_id", "endpoint", "api_version", "region", "voice")
+    @field_validator("id", "name", "model_id", "endpoint", "api_version", "region", "voice", "language")
     @classmethod
     def strip_text(cls, value: str) -> str:
         return str(value or "").strip()
@@ -91,6 +93,9 @@ class AIModelSettings(BaseModel):
     stt_fallback_id: str = Field(default="", max_length=120)
     tts_primary_id: str = Field(default="", max_length=120)
     tts_fallback_id: str = Field(default="", max_length=120)
+    # Hindi interview speak preferences (English uses tts_primary_id / tts_fallback_id).
+    tts_hi_primary_id: str = Field(default="", max_length=120)
+    tts_hi_fallback_id: str = Field(default="", max_length=120)
 
     @field_validator(
         "azure_openai_endpoint",
@@ -105,6 +110,8 @@ class AIModelSettings(BaseModel):
         "stt_fallback_id",
         "tts_primary_id",
         "tts_fallback_id",
+        "tts_hi_primary_id",
+        "tts_hi_fallback_id",
     )
     @classmethod
     def strip_optional_text(cls, value: str) -> str:

@@ -16,6 +16,10 @@ from agents.interview_agent.followup_generator import (
     followup_invents_team_context,
     generate_followups,
 )
+from agents.interview_agent.interview_language import (
+    normalize_interview_language,
+    prompt_language_instruction,
+)
 from agents.interview_agent.question_generator import (
     generate_questions_from_blueprint,
     is_spoken_interview_question,
@@ -34,6 +38,34 @@ logger = logging.getLogger(__name__)
 
 SCENARIO_MAX_WORDS = 42
 FOLLOWUP_MAX_WORDS = 22
+
+
+def _language_instruction(interview_language: Any) -> str:
+    """Return the non-negotiable spoken-language rule for an LLM prompt."""
+    return (
+        "LOCKED INTERVIEW LANGUAGE (highest priority): "
+        f"{prompt_language_instruction(interview_language)}"
+    )
+
+
+def _is_spoken_question_for_language(text: str, interview_language: Any) -> bool:
+    """Validate Hindi output without relying on the English-only question-cue regex."""
+    if normalize_interview_language(interview_language) == "en":
+        return is_spoken_interview_question(text)
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return (
+        len(cleaned) >= 12
+        and bool(re.search(r"[\u0900-\u097f]", cleaned))
+        and cleaned.rstrip().endswith("?")
+    )
+
+
+def _looks_like_summary_for_language(text: str, interview_language: Any) -> bool:
+    # The shared heuristic intentionally recognizes English question cues only.
+    return (
+        normalize_interview_language(interview_language) == "en"
+        and looks_like_resume_summary(text)
+    )
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -185,6 +217,7 @@ def _call_llm_question_batch(
     role_family: str,
     resume_context: dict[str, str],
     candidate_level: str | None = None,
+    interview_language: str = "en",
 ) -> list[dict[str, Any]]:
     preview = [
         {
@@ -212,6 +245,7 @@ def _call_llm_question_batch(
         "Write professional spoken questions like ChatGPT would for a real interview — specific, "
         "scenario-based, and grounded in the candidate's skills/projects — NOT generic templates. "
         "For EACH slot return exactly one question_text. "
+        f"{_language_instruction(interview_language)}\n"
         "Hard rules:\n"
         "- One question, one '?', max 42 words, natural speech.\n"
         "- Never use resume bio/objective wording; never markdown (#).\n"
@@ -253,6 +287,7 @@ def _llm_spoken_questions_from_plan(
     role_family: str,
     resume_context: dict[str, str],
     candidate_level: str | None = None,
+    interview_language: str = "en",
 ) -> list[InterviewQuestion] | None:
     if not slots:
         return None
@@ -276,6 +311,7 @@ def _llm_spoken_questions_from_plan(
                     role_family=role_family,
                     resume_context=resume_context,
                     candidate_level=candidate_level,
+                    interview_language=interview_language,
                 )
             except Exception:
                 logger.exception(
@@ -289,6 +325,7 @@ def _llm_spoken_questions_from_plan(
                     role_family=role_family,
                     resume_context=resume_context,
                     candidate_level=candidate_level,
+                    interview_language=interview_language,
                 )
             for item in items:
                 try:
@@ -319,7 +356,9 @@ def _llm_spoken_questions_from_plan(
                 raw_text or (seed.question_text if seed else ""),
                 SCENARIO_MAX_WORDS,
             )
-            from_llm = bool(raw_text) and is_spoken_interview_question(text)
+            from_llm = bool(raw_text) and _is_spoken_question_for_language(
+                text, interview_language
+            )
             if from_llm:
                 llm_used += 1
             else:
@@ -351,7 +390,7 @@ def _llm_spoken_questions_from_plan(
                     text = seed.question_text if seed else text
             if slot.category_id != "introductory_questions" and _looks_like_intro(text):
                 text = seed.question_text if seed else text
-            if not is_spoken_interview_question(text):
+            if not _is_spoken_question_for_language(text, interview_language):
                 text = seed.question_text if seed else text
             key = _question_key(text)
             if not key or key in used:
@@ -417,6 +456,7 @@ def generate_questions_with_llama(
     job_title: str | None = None,
     resume_context: dict[str, str] | None = None,
     candidate_level: str | None = None,
+    interview_language: str | None = None,
 ) -> list[InterviewQuestion]:
     """LLM-primary spoken questions from Agent 3 question_plan; templates only as fallback.
 
@@ -427,6 +467,12 @@ def generate_questions_with_llama(
     role = (job_title or ctx.get("job_position") or _as_dict(blueprint.get("input_summary")).get("job_title") or "the role")
     role = str(role).strip() or "the role"
     role_family = str(blueprint.get("role_family") or "general")
+    language = normalize_interview_language(
+        interview_language
+        or ctx.get("interview_language")
+        or blueprint.get("interview_language")
+        or _as_dict(blueprint.get("input_summary")).get("interview_language")
+    )
     level = (
         candidate_level
         or blueprint.get("candidate_level")
@@ -441,6 +487,7 @@ def generate_questions_with_llama(
             role_family=role_family,
             resume_context=ctx,
             candidate_level=str(level) if level else None,
+            interview_language=language,
         )
         if llm_questions:
             return llm_questions
@@ -470,6 +517,7 @@ def generate_questions_with_llama(
     ]
     system = (
         "Rewrite each seed into a strong spoken interview question (max 42 words). "
+        f"{_language_instruction(language)} "
         "Prefer concrete scenario probes (scale, failure, trade-off) over generic recitals. "
         "Never use resume bio language. Keep count/order/category. "
         "Return JSON: {\"questions\":[{\"order\":1,\"question_text\":\"...\","
@@ -498,7 +546,7 @@ def generate_questions_with_llama(
                 str(item.get("question_text") or q.question_text).strip(),
                 SCENARIO_MAX_WORDS,
             )
-            if not is_spoken_interview_question(text):
+            if not _is_spoken_question_for_language(text, language):
                 text = q.question_text
             key = _question_key(text)
             if not key or key in used:
@@ -553,10 +601,15 @@ def generate_adaptive_followups(
     max_followups: int = 2,
     already_asked: set[str] | None = None,
     candidate_level: str | None = None,
+    interview_language: str | None = None,
+    evaluation_context: dict[str, Any] | None = None,
 ) -> list[FollowUpQuestion]:
     """LLM-first follow-ups from Agent 6 evaluation; templates only if LLM fails."""
     used = {k.casefold() for k in (already_asked or set())}
     eval_data = evaluation or {}
+    language = normalize_interview_language(
+        interview_language or (evaluation_context or {}).get("interview_language")
+    )
 
     def _template_fallback() -> list[FollowUpQuestion]:
         return generate_followups(
@@ -575,6 +628,7 @@ def generate_adaptive_followups(
     hints = list(eval_data.get("followup_hints") or [])
     system = (
         "You are Agent 4 on a live voice interview. "
+        f"{_language_instruction(language)} "
         "Agent 6 already scored the answer. Your job is ONLY to invent NEW follow-up "
         "questions from that evaluation — grounded in the candidate's EXACT words and gaps. "
         "If the candidate did not really answer, return {\"follow_ups\": []}. "
@@ -612,7 +666,9 @@ def generate_adaptive_followups(
             if not isinstance(item, dict):
                 continue
             text = shorten_question(str(item.get("question_text") or "").strip(), FOLLOWUP_MAX_WORDS)
-            if len(text) < 12 or looks_like_resume_summary(text.rstrip("?")):
+            if len(text) < 12 or _looks_like_summary_for_language(
+                text.rstrip("?"), language
+            ):
                 continue
             if followup_invents_team_context(text, candidate_answer):
                 continue

@@ -8,6 +8,7 @@ from typing import Any
 
 from agents.evaluation_agent.schemas import EvaluationResult
 from agents.evaluation_agent.web_research import fetch_web_context, format_web_context
+from agents.interview_agent.interview_language import normalize_interview_language
 from agents.shared.llama_client import call_llama_json, llama_available, llama_model_id
 from core.chroma_store import format_evaluation_examples, retrieve_evaluation_examples
 
@@ -211,6 +212,8 @@ def build_candidate_context(
     else:
         jd_req_text = str(jd_requirements or "").strip()
 
+    from agents.interview_agent.interview_language import language_from_snapshot
+
     return {
         "job_position": (job_position or "").strip(),
         "resume_summary": _truncate(resume_summary, 1200),
@@ -219,6 +222,7 @@ def build_candidate_context(
         "jd_text": _truncate(jd_text or "", 2500),
         "jd_requirements": _truncate(jd_req_text, 800),
         "resume_score": str(snap.get("overall_score") or snap.get("score") or ""),
+        "interview_language": language_from_snapshot(snap),
     }
 
 
@@ -269,6 +273,7 @@ def evaluate_answer_with_llama(
         return _non_answer_result()
     skills = [s for s in (skill_tags or []) if s]
     level = _normalize_candidate_level(context.get("candidate_level"))
+    interview_language = normalize_interview_language(context.get("interview_language"))
     web_snippets: list[dict[str, str]] = []
     if use_web:
         query = " ".join(
@@ -324,6 +329,11 @@ def evaluate_answer_with_llama(
         "no idea, or equivalent with no real content MUST score 0 and verdict "
         "insufficient — never give consolation points such as 20 or 35. "
         "Only score above 0 if the candidate actually attempted the question. "
+        "The candidate may answer in Hindi, English, or Hinglish, regardless of the "
+        "interview's selected language. Evaluate the meaning and technical substance "
+        "equally across all three. Do not deduct points for language choice, code-switching, "
+        "grammar, accent, transliteration, or language purity; deduct only for substantive "
+        "inaccuracy, irrelevance, or missing depth. "
         "followup_hints must be NEW spoken probes grounded in THIS answer's gaps — "
         "never generic rephrases of the original question. "
         "Never invent that the candidate 'worked with others' or suggest "
@@ -342,6 +352,9 @@ Question:
 
 Candidate answer:
 {candidate_answer}
+
+Selected interview language: {"Hindi" if interview_language == "hi" else "English"}
+The answer itself may be Hindi, English, or Hinglish; score its substance, not language purity.
 
 Skill tags: {", ".join(skills) or "n/a"}
 

@@ -102,6 +102,9 @@ export function CandidateResultCard({ candidate: c, delay = 0 }) {
                 <span className="inline-flex items-center gap-1">
                   <GraduationCap size={12} /> {c.education}
                 </span>
+                <span className="rounded-full bg-orange-100 px-2 py-0.5 font-semibold text-orange-700 dark:bg-orange-900/30 dark:text-orange-300">
+                  Interview: {c.interviewLanguage === 'hi' ? 'Hindi' : 'English'}
+                </span>
               </p>
             </div>
           </div>

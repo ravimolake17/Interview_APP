@@ -21,6 +21,7 @@ from agents.screening_agent.services.docling_extractor import DoclingConversionE
 from agents.screening_agent.services.document_ingestion import ingest_document, store_uploaded_document
 from agents.screening_agent.services.screening_queue_service import ScreeningQueueService
 from services.audit_service import audit_context_from_request
+from agents.interview_agent.interview_language import normalize_interview_language
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Resume Extraction"])
@@ -115,6 +116,7 @@ async def extract_resume_async(
     jd_original_filename: str | None = Form(None),
     jd_file_url: str | None = Form(None),
     send_invite_email: str = Form("true"),
+    interview_language: str = Form("en"),
     db: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ) -> ScreeningJobAcceptedResponse:
@@ -147,6 +149,7 @@ async def extract_resume_async(
             "jd_file_url": (jd_file_url or "").strip() or None,
             "send_invite_email": str(send_invite_email or "true").strip().lower()
             in {"1", "true", "yes", "on"},
+            "interview_language": normalize_interview_language(interview_language),
             "audit_context": audit_context_from_request(current_user, request),
             "company_id": company_id_for_actor(current_user, request),
         }

@@ -2,56 +2,98 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight, Loader2, Play } from 'lucide-react';
 import { previewTtsVoice } from '../../services/api';
 
-/** Azure English (India) voices by category. Edge usually supports Standard only. */
-export const TTS_VOICE_CATALOG = [
-  {
-    id: 'standard',
-    title: 'Standard neural',
-    subtitle: 'Clear everyday Indian English — best default for interviews',
-    voices: [
-      { model_id: 'en-IN-NeerjaNeural', name: 'Neerja', gender: 'female' },
-      { model_id: 'en-IN-AnanyaNeural', name: 'Ananya', gender: 'female' },
-      { model_id: 'en-IN-AartiNeural', name: 'Aarti', gender: 'female' },
-      { model_id: 'en-IN-AashiNeural', name: 'Aashi', gender: 'female' },
-      { model_id: 'en-IN-KavyaNeural', name: 'Kavya', gender: 'female' },
-      { model_id: 'en-IN-PrabhatNeural', name: 'Prabhat', gender: 'male' },
-      { model_id: 'en-IN-AaravNeural', name: 'Aarav', gender: 'male' },
-      { model_id: 'en-IN-KunalNeural', name: 'Kunal', gender: 'male' },
-      { model_id: 'en-IN-ArjunNeural', name: 'Arjun', gender: 'male' },
-      { model_id: 'en-IN-RehaanNeural', name: 'Rehaan', gender: 'male' },
-    ],
-  },
-  {
-    id: 'indic',
-    title: 'Indic neural',
-    subtitle: 'Indic-style delivery (…IndicNeural)',
-    voices: [
-      { model_id: 'en-IN-AartiIndicNeural', name: 'Aarti Indic', gender: 'female' },
-      { model_id: 'en-IN-NeerjaIndicNeural', name: 'Neerja Indic', gender: 'female' },
-      { model_id: 'en-IN-ArjunIndicNeural', name: 'Arjun Indic', gender: 'male' },
-      { model_id: 'en-IN-PrabhatIndicNeural', name: 'Prabhat Indic', gender: 'male' },
-    ],
-  },
-  {
-    id: 'hd',
-    title: 'HD Dragon',
-    subtitle: 'Higher-fidelity DragonHD voices',
-    voices: [
-      { model_id: 'en-IN-Diya:DragonHDLatestNeural', name: 'Diya HD', gender: 'female' },
-      { model_id: 'en-IN-Meera:DragonHDLatestNeural', name: 'Meera HD', gender: 'female' },
-      { model_id: 'en-IN-Aarti:DragonHDLatestNeural', name: 'Aarti HD', gender: 'female' },
-      { model_id: 'en-IN-Neerja:DragonHDLatestNeural', name: 'Neerja HD', gender: 'female' },
-      { model_id: 'en-IN-Lavanya:DragonHDLatestNeural', name: 'Lavanya HD', gender: 'female' },
-      { model_id: 'en-IN-Arjun:DragonHDLatestNeural', name: 'Arjun HD', gender: 'male' },
-    ],
-  },
-];
+/** Azure / Edge voices by interview language. */
+export const TTS_VOICE_CATALOG = {
+  en: [
+    {
+      id: 'standard',
+      title: 'Standard neural',
+      subtitle: 'Clear everyday Indian English — best default for interviews',
+      voices: [
+        { model_id: 'en-IN-NeerjaNeural', name: 'Neerja', gender: 'female' },
+        { model_id: 'en-IN-AnanyaNeural', name: 'Ananya', gender: 'female' },
+        { model_id: 'en-IN-AartiNeural', name: 'Aarti', gender: 'female' },
+        { model_id: 'en-IN-AashiNeural', name: 'Aashi', gender: 'female' },
+        { model_id: 'en-IN-KavyaNeural', name: 'Kavya', gender: 'female' },
+        { model_id: 'en-IN-PrabhatNeural', name: 'Prabhat', gender: 'male' },
+        { model_id: 'en-IN-AaravNeural', name: 'Aarav', gender: 'male' },
+        { model_id: 'en-IN-KunalNeural', name: 'Kunal', gender: 'male' },
+        { model_id: 'en-IN-ArjunNeural', name: 'Arjun', gender: 'male' },
+        { model_id: 'en-IN-RehaanNeural', name: 'Rehaan', gender: 'male' },
+      ],
+    },
+    {
+      id: 'indic',
+      title: 'Indic neural',
+      subtitle: 'Indic-style delivery (…IndicNeural)',
+      voices: [
+        { model_id: 'en-IN-AartiIndicNeural', name: 'Aarti Indic', gender: 'female' },
+        { model_id: 'en-IN-NeerjaIndicNeural', name: 'Neerja Indic', gender: 'female' },
+        { model_id: 'en-IN-ArjunIndicNeural', name: 'Arjun Indic', gender: 'male' },
+        { model_id: 'en-IN-PrabhatIndicNeural', name: 'Prabhat Indic', gender: 'male' },
+      ],
+    },
+    {
+      id: 'hd',
+      title: 'HD Dragon',
+      subtitle: 'Higher-fidelity DragonHD voices',
+      voices: [
+        { model_id: 'en-IN-Diya:DragonHDLatestNeural', name: 'Diya HD', gender: 'female' },
+        { model_id: 'en-IN-Meera:DragonHDLatestNeural', name: 'Meera HD', gender: 'female' },
+        { model_id: 'en-IN-Aarti:DragonHDLatestNeural', name: 'Aarti HD', gender: 'female' },
+        { model_id: 'en-IN-Neerja:DragonHDLatestNeural', name: 'Neerja HD', gender: 'female' },
+        { model_id: 'en-IN-Lavanya:DragonHDLatestNeural', name: 'Lavanya HD', gender: 'female' },
+        { model_id: 'en-IN-Arjun:DragonHDLatestNeural', name: 'Arjun HD', gender: 'male' },
+      ],
+    },
+  ],
+  hi: [
+    {
+      id: 'standard',
+      title: 'Standard neural',
+      subtitle: 'Hindi voices — Swara supports empathetic style (more natural interviewer tone)',
+      voices: [
+        { model_id: 'hi-IN-SwaraNeural', name: 'Swara', gender: 'female' },
+        { model_id: 'hi-IN-AartiNeural', name: 'Aarti', gender: 'female' },
+        { model_id: 'hi-IN-AnanyaNeural', name: 'Ananya', gender: 'female' },
+        { model_id: 'hi-IN-KavyaNeural', name: 'Kavya', gender: 'female' },
+        { model_id: 'hi-IN-MadhurNeural', name: 'Madhur', gender: 'male' },
+        { model_id: 'hi-IN-AaravNeural', name: 'Aarav', gender: 'male' },
+        { model_id: 'hi-IN-KunalNeural', name: 'Kunal', gender: 'male' },
+        { model_id: 'hi-IN-ArjunNeural', name: 'Arjun', gender: 'male' },
+        { model_id: 'hi-IN-RehaanNeural', name: 'Rehaan', gender: 'male' },
+      ],
+    },
+  ],
+};
+
+export function normalizeTtsLanguage(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'hi' || raw === 'hi-in' || raw === 'hindi') return 'hi';
+  return 'en';
+}
+
+export function inferTtsLanguage(modelId, language) {
+  if (language === 'hi' || language === 'en') return language;
+  const id = String(modelId || '').trim().toLowerCase();
+  if (id.startsWith('hi-') || id.startsWith('hi_')) return 'hi';
+  return 'en';
+}
 
 export function findTtsVoice(modelId) {
   const id = String(modelId || '').trim();
-  for (const category of TTS_VOICE_CATALOG) {
-    const match = category.voices.find((voice) => voice.model_id === id);
-    if (match) return { ...match, categoryId: category.id, categoryTitle: category.title };
+  for (const language of ['en', 'hi']) {
+    for (const category of TTS_VOICE_CATALOG[language] || []) {
+      const match = category.voices.find((voice) => voice.model_id === id);
+      if (match) {
+        return {
+          ...match,
+          language,
+          categoryId: category.id,
+          categoryTitle: category.title,
+        };
+      }
+    }
   }
   return null;
 }
@@ -82,11 +124,13 @@ function errorText(err) {
 
 export default function TtsVoicePicker({
   provider = 'azure',
+  language = 'en',
   modelId,
   voice,
   onSelect,
   compact = false,
 }) {
+  const lang = normalizeTtsLanguage(language);
   const known = findTtsVoice(modelId);
   const [categoryId, setCategoryId] = useState(known?.categoryId || 'standard');
   const [gender, setGender] = useState(known?.gender || voice || 'female');
@@ -103,23 +147,33 @@ export default function TtsVoicePicker({
 
   useEffect(() => {
     const next = findTtsVoice(modelId);
-    if (next) {
+    if (next && next.language === lang) {
       setCategoryId(next.categoryId);
       setGender(next.gender);
+    } else {
+      setCategoryId('standard');
+      setGender(voice === 'male' ? 'male' : 'female');
     }
-  }, [modelId]);
+  }, [modelId, lang, voice]);
 
   const categories = useMemo(() => {
+    const base = TTS_VOICE_CATALOG[lang] || TTS_VOICE_CATALOG.en;
     if (provider === 'edge') {
-      const edgeIds = new Set(['en-IN-NeerjaNeural', 'en-IN-PrabhatNeural']);
-      return TTS_VOICE_CATALOG.filter((item) => item.id === 'standard').map((item) => ({
-        ...item,
-        subtitle: 'Edge preview supports Neerja (female) and Prabhat (male). Use Azure for Indic / HD.',
-        voices: item.voices.filter((voiceItem) => edgeIds.has(voiceItem.model_id)),
-      }));
+      const edgeIds = lang === 'hi'
+        ? new Set(['hi-IN-SwaraNeural', 'hi-IN-MadhurNeural'])
+        : new Set(['en-IN-NeerjaNeural', 'en-IN-PrabhatNeural']);
+      return base
+        .filter((item) => item.id === 'standard')
+        .map((item) => ({
+          ...item,
+          subtitle: lang === 'hi'
+            ? 'Edge preview supports Swara (female) and Madhur (male).'
+            : 'Edge preview supports Neerja (female) and Prabhat (male). Use Azure for Indic / HD.',
+          voices: item.voices.filter((voiceItem) => edgeIds.has(voiceItem.model_id)),
+        }));
     }
-    return TTS_VOICE_CATALOG;
-  }, [provider]);
+    return base;
+  }, [provider, lang]);
 
   const category = categories.find((item) => item.id === categoryId) || categories[0];
   const genderVoices = (category?.voices || []).filter((item) => item.gender === gender);
@@ -130,10 +184,21 @@ export default function TtsVoicePicker({
     setPreviewing(voiceItem.model_id);
     try {
       const previewProvider = provider === 'edge' && categoryId !== 'standard' ? 'azure' : provider;
+      const samplePrompt = lang === 'hi'
+        ? (
+          voiceItem.gender === 'male'
+            ? `नमस्ते। मैं ${voiceItem.name} हूँ। यह हिंदी पुरुष आवाज़ है।`
+            : `नमस्ते। मैं ${voiceItem.name} हूँ। यह हिंदी महिला आवाज़ है।`
+        )
+        : (
+          `Hello. This is the ${voiceItem.name} Indian English `
+          + `${voiceItem.gender} voice for interview questions.`
+        );
       const { data } = await previewTtsVoice({
         provider: previewProvider === 'edge' ? 'edge' : 'azure',
         model_id: voiceItem.model_id,
         voice: voiceItem.gender,
+        prompt: samplePrompt,
       });
       if (data.audio_base64) playBase64(data.audio_base64, data.audio_content_type, audioRef);
     } catch (err) {
@@ -220,6 +285,7 @@ export default function TtsVoicePicker({
                       model_id: voiceItem.model_id,
                       voice: voiceItem.gender,
                       name: voiceItem.name,
+                      language: lang,
                     })}
                   >
                     <p className="text-sm font-medium text-col truncate">{voiceItem.name}</p>

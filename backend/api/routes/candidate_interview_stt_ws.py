@@ -77,9 +77,17 @@ async def interview_stt_stream(websocket: WebSocket, session_id: str):
         return
 
     candidate_id = str(payload.get("rr_candidate_id") or "")
+    interview_language = "en"
     async with AsyncSessionLocal() as db:
         try:
-            await require_scheduled_interview(db, candidate_id)
+            candidate, _interview = await require_scheduled_interview(db, candidate_id)
+            from agents.interview_agent.interview_language import language_from_snapshot
+
+            interview_language = language_from_snapshot(
+                candidate.evaluation_snapshot
+                if isinstance(candidate.evaluation_snapshot, dict)
+                else {}
+            )
         except Exception as exc:
             detail = getattr(exc, "detail", None) or "interview not found"
             await websocket.close(code=4404, reason=str(detail)[:100])
@@ -105,12 +113,14 @@ async def interview_stt_stream(websocket: WebSocket, session_id: str):
         await outbound.put(message)
 
     await _close_active(session_id)
+    from agents.interview_agent.interview_language import azure_stt_locale
+
     session = StreamingSttSession(
         session_id=session_id,
         candidate_id=candidate_id,
         loop=loop,
         on_event=on_event,
-        language="en-IN",
+        language=azure_stt_locale(interview_language),
     )
     async with _active_lock:
         _active_sessions[session_id] = session

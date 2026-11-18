@@ -75,11 +75,23 @@ class InterviewTTSCacheService:
             if commit_each:
                 await self.db.commit()
 
+        from sqlalchemy import select
+
+        from agents.interview_agent.interview_language import language_from_snapshot
         from agents.interview_agent.tts_cache_keys import cache_fingerprint
         from agents.shared.model_catalog import ordered_targets, voice_for_entry
+        from models.candidate import Candidate
 
         default_voice = TTS_VOICE
-        targets = ordered_targets("tts")
+        candidate = await self.db.scalar(
+            select(Candidate).where(Candidate.candidate_id == candidate_id)
+        )
+        interview_language = language_from_snapshot(
+            candidate.evaluation_snapshot
+            if candidate is not None and isinstance(candidate.evaluation_snapshot, dict)
+            else {}
+        )
+        targets = ordered_targets("tts", language=interview_language)
         if targets:
             default_voice = voice_for_entry(targets[0]) or TTS_VOICE
 
@@ -121,7 +133,12 @@ class InterviewTTSCacheService:
                     ready += 1
                     continue
 
-                result = await asyncio.to_thread(synthesize_speech, text, voice=default_voice)
+                result = await asyncio.to_thread(
+                    synthesize_speech,
+                    text,
+                    voice=default_voice,
+                    language=interview_language,
+                )
                 rel = write_audio_file(candidate_id, qid, result["audio_bytes"])
                 voice = str(result.get("voice") or default_voice)
                 content_type = str(result.get("content_type") or "audio/wav")

@@ -219,6 +219,7 @@ def synthesize_speech(
     voice: str | None = None,
     model: str = MODEL_ID,
     speed: float | None = None,
+    language: str | None = None,
 ) -> dict[str, Any]:
     """Convert interviewer text to WAV (or Edge MP3 tagged as WAV-compatible bytes)."""
     _ = speed
@@ -241,7 +242,7 @@ def synthesize_speech(
 
     record_event("tts_synthesis_start")
     audio_bytes, sample_rate, content_type, provider, model_id, engine = _synthesize_with_fallback(
-        cleaned, voice=chosen_voice, model=model
+        cleaned, voice=chosen_voice, model=model, language=language
     )
 
     if not audio_bytes:
@@ -264,11 +265,13 @@ def synthesize_speech(
         len(cleaned),
     )
 
+    from agents.interview_agent.interview_language import tts_voice_and_xml_lang
+
     return {
         "audio_bytes": audio_bytes,
         "content_type": content_type,
         "provider": provider,
-        "model": model_id if engine == "parler" else _EDGE_VOICES[chosen_voice],
+        "model": model_id if engine == "parler" else tts_voice_and_xml_lang(language, chosen_voice)[0],
         "voice": chosen_voice,
         "speed": None,
         "stt_companion": "whisper-large-v3",
@@ -280,15 +283,17 @@ def synthesize_speech(
 
 
 def _synthesize_with_fallback(
-    cleaned: str, *, voice: str, model: str
+    cleaned: str, *, voice: str, model: str, language: str | None = None
 ) -> tuple[bytes, int, str, str, str, str]:
     from agents.shared.model_catalog import describe_target, ordered_targets, should_fallback
 
-    targets = ordered_targets("tts")
+    targets = ordered_targets("tts", language=language)
     last_error: Exception | None = None
     for index, entry in enumerate(targets or [None]):
         try:
-            return _synthesize_entry(entry, cleaned, voice=voice, model=model)
+            return _synthesize_entry(
+                entry, cleaned, voice=voice, model=model, language=language
+            )
         except Exception as exc:
             last_error = exc
             if targets and index < len(targets) - 1 and should_fallback(exc):
@@ -306,7 +311,7 @@ def _synthesize_with_fallback(
     engine = resolve_engine()
     if engine == "edge":
         audio_bytes, sample_rate, content_type, provider, model_id = _synthesize_edge(
-            cleaned, voice=voice
+            cleaned, voice=voice, language=language
         )
         return audio_bytes, sample_rate, content_type, provider, model_id, "edge"
     if not _cuda_available():
@@ -327,8 +332,14 @@ def synthesize_speech_for_entry(entry, text: str) -> dict[str, Any]:
     if not cleaned:
         raise ValueError("Empty text for TTS.")
     gender = voice_for_entry(entry)
+    from agents.shared.model_catalog import entry_language
+
     audio_bytes, sample_rate, content_type, provider, model_id, engine = _synthesize_entry(
-        entry, cleaned, voice=gender, model=getattr(entry, "model_id", None) or MODEL_ID
+        entry,
+        cleaned,
+        voice=gender,
+        model=getattr(entry, "model_id", None) or MODEL_ID,
+        language=entry_language(entry),
     )
     if not audio_bytes:
         raise RuntimeError("TTS returned empty audio.")
@@ -344,20 +355,77 @@ def synthesize_speech_for_entry(entry, text: str) -> dict[str, Any]:
     }
 
 
-def _neural_for_entry(entry, voice: str) -> str:
+# Voices that support Azure mstts:express-as styles (interview-friendly).
+# Style changes emotion/feel without slowing speech.
+_EXPRESSIVE_STYLES: dict[str, str] = {
+    "en-in-neerjaneural": "empathetic",
+    "en-in-neerjaindicneural": "empathetic",
+    "hi-in-swaraneural": "empathetic",
+}
+
+# Keep default speaking speed (user prefers current pace). Only emotion + quality.
+_TTS_STYLE_DEGREE = os.getenv("TTS_STYLE_DEGREE", "1.4").strip() or "1.4"
+_TTS_STYLE = os.getenv("TTS_STYLE", "empathetic").strip().casefold() or "empathetic"
+
+
+def build_interview_ssml(text: str, *, voice_name: str, xml_lang: str) -> str:
+    """SSML tuned for natural interviewer delivery (Azure Speech).
+
+    Uses expressive style when supported — warmer/more human without changing speed.
+    Unsupported style tags are ignored by Azure, so this is safe for all voices.
+    """
+    neural = xml_escape(str(voice_name or "").strip())
+    lang = xml_escape(str(xml_lang or "en-IN").strip() or "en-IN")
+    body = xml_escape(text)
+    key = str(voice_name or "").strip().casefold()
+    style = _EXPRESSIVE_STYLES.get(key)
+    if style and _TTS_STYLE in {"empathetic", "cheerful", "newscast"}:
+        # Allow env override of style name when the voice supports express-as.
+        style = _TTS_STYLE if key in _EXPRESSIVE_STYLES else style
+    if style:
+        inner = (
+            f'<mstts:express-as style="{xml_escape(style)}" '
+            f'styledegree="{xml_escape(_TTS_STYLE_DEGREE)}">'
+            f"{body}"
+            f"</mstts:express-as>"
+        )
+    else:
+        inner = body
+    return (
+        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{lang}">'
+        f'<voice xml:lang="{lang}" name="{neural}">{inner}</voice>'
+        f"</speak>"
+    )
+
+
+def _neural_for_entry(entry, voice: str, language: str | None = None) -> str:
+    from agents.interview_agent.interview_language import tts_voice_and_xml_lang
+    from agents.shared.model_catalog import entry_language
+
+    gender = _normalize_voice(voice or getattr(entry, "voice", None))
     mid = str(getattr(entry, "model_id", None) or "").strip()
     if mid:
         return mid
-    return _EDGE_VOICES[_normalize_voice(voice or getattr(entry, "voice", None))]
+    # Catalog row has no model id — use language-safe default by gender.
+    lang = entry_language(entry) if entry is not None else language
+    return tts_voice_and_xml_lang(lang or language, gender)[0]
 
 
-def _synthesize_entry(entry, cleaned: str, *, voice: str, model: str):
+def _synthesize_entry(
+    entry, cleaned: str, *, voice: str, model: str, language: str | None = None
+):
     provider = (getattr(entry, "provider", None) or resolve_engine()).strip().lower()
     if provider == "azure":
-        return _synthesize_azure_speech(cleaned, voice=voice, entry=entry)
+        return _synthesize_azure_speech(
+            cleaned, voice=voice, entry=entry, language=language
+        )
     if provider == "edge":
         audio_bytes, sample_rate, content_type, tts_provider, model_id = _synthesize_edge(
-            cleaned, voice=voice, neural=_neural_for_entry(entry, voice)
+            cleaned,
+            voice=voice,
+            neural=_neural_for_entry(entry, voice, language=language),
+            language=language,
         )
         return audio_bytes, sample_rate, content_type, tts_provider, model_id, "edge"
     model_id = (getattr(entry, "model_id", None) or model or MODEL_ID).strip() or MODEL_ID
@@ -365,9 +433,12 @@ def _synthesize_entry(entry, cleaned: str, *, voice: str, model: str):
     return audio_bytes, sample_rate, "audio/wav", TTS_PROVIDER, model_id, "parler"
 
 
-def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes, int, str, str, str, str]:
+def _synthesize_azure_speech(
+    cleaned: str, *, voice: str, entry, language: str | None = None
+) -> tuple[bytes, int, str, str, str, str]:
     import time as _time
 
+    from agents.interview_agent.interview_language import tts_voice_and_xml_lang
     from agents.screening_agent.config import settings
     from agents.shared.azure_concurrency import azure_slot
     from agents.shared.azure_http import get_azure_http_client
@@ -387,12 +458,9 @@ def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes,
     ).rstrip("/")
     if not key:
         raise RuntimeError("Azure Speech key is not configured in SuperAdmin → API & Integration.")
-    neural = _neural_for_entry(entry, voice)
-    ssml = (
-        f'<speak version="1.0" xml:lang="en-IN">'
-        f'<voice xml:lang="en-IN" name="{xml_escape(neural)}">{xml_escape(cleaned)}</voice>'
-        f"</speak>"
-    )
+    neural = _neural_for_entry(entry, voice, language=language)
+    xml_lang = tts_voice_and_xml_lang(language, voice)[1]
+    ssml = build_interview_ssml(cleaned, voice_name=neural, xml_lang=xml_lang)
     client = get_azure_http_client("speech")
 
     class _TtsHttpError(RuntimeError):
@@ -407,7 +475,8 @@ def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes,
             headers={
                 "Ocp-Apim-Subscription-Key": key,
                 "Content-Type": "application/ssml+xml",
-                "X-Microsoft-OutputFormat": "audio-16khz-128kbitrate-mono-mp3",
+                # 24 kHz sounds noticeably less "telephone/robot" than 16 kHz.
+                "X-Microsoft-OutputFormat": "audio-24khz-160kbitrate-mono-mp3",
                 "User-Agent": "InterviewAgenticAI",
             },
             content=ssml.encode("utf-8"),
@@ -443,7 +512,7 @@ def _synthesize_azure_speech(cleaned: str, *, voice: str, entry) -> tuple[bytes,
     if not response.content:
         raise RuntimeError("Azure Speech TTS returned empty audio.")
     wav_bytes, content_type = _mp3_to_wav(response.content)
-    sample_rate = 16000 if content_type == "audio/wav" else 0
+    sample_rate = 24000 if content_type == "audio/wav" else 0
     return wav_bytes, sample_rate, content_type, "azure_speech_tts", neural, "azure"
 
 
@@ -472,14 +541,17 @@ def warmup_tts() -> dict[str, Any]:
 
 
 def _synthesize_edge(
-    cleaned: str, *, voice: str, neural: str | None = None
+    cleaned: str, *, voice: str, neural: str | None = None, language: str | None = None
 ) -> tuple[bytes, int, str, str, str]:
-    """Fast cloud neural TTS (Indian English). Returns WAV bytes."""
+    """Fast cloud neural TTS (English/Hindi). Returns WAV bytes."""
     import edge_tts
 
-    edge_voice = (neural or "").strip() or _EDGE_VOICES[_normalize_voice(voice)]
+    from agents.interview_agent.interview_language import tts_voice_and_xml_lang
+
+    edge_voice = (neural or "").strip() or tts_voice_and_xml_lang(language, voice)[0]
 
     async def _run() -> bytes:
+        # Keep Edge at default speed; realism comes from Azure styles + HD voices.
         communicate = edge_tts.Communicate(cleaned, edge_voice)
         buf = io.BytesIO()
         async for chunk in communicate.stream():

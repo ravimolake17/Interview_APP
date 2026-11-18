@@ -142,6 +142,7 @@ def default_catalog(base: AIModelSettings | None = None) -> AIModelSettings:
             region=region,
             enabled=True,
             voice="female",
+            language="en",
         ),
         AICatalogEntry(
             id="edge-neural",
@@ -151,6 +152,29 @@ def default_catalog(base: AIModelSettings | None = None) -> AIModelSettings:
             model_id="en-IN-NeerjaNeural",
             enabled=True,
             voice="female",
+            language="en",
+        ),
+        AICatalogEntry(
+            id="azure-speech-tts-hi",
+            name="Azure Hindi TTS",
+            kind="tts",
+            provider="azure",
+            model_id="hi-IN-SwaraNeural",
+            endpoint=tts_endpoint,
+            region=region,
+            enabled=True,
+            voice="female",
+            language="hi",
+        ),
+        AICatalogEntry(
+            id="edge-neural-hi",
+            name="Edge neural TTS (Hindi)",
+            kind="tts",
+            provider="edge",
+            model_id="hi-IN-SwaraNeural",
+            enabled=True,
+            voice="female",
+            language="hi",
         ),
     ]
     provider = str(data.get("provider") or "groq").strip().lower()
@@ -166,8 +190,10 @@ def default_catalog(base: AIModelSettings | None = None) -> AIModelSettings:
         stt_primary, stt_fallback = "groq-whisper", "azure-speech-stt"
     if tts_provider == "azure":
         tts_primary, tts_fallback = "azure-speech-tts", "edge-neural"
+        tts_hi_primary, tts_hi_fallback = "azure-speech-tts-hi", "edge-neural-hi"
     else:
         tts_primary, tts_fallback = "edge-neural", "azure-speech-tts"
+        tts_hi_primary, tts_hi_fallback = "edge-neural-hi", "azure-speech-tts-hi"
     data.update(
         {
             "chat_models": chat_models,
@@ -179,6 +205,8 @@ def default_catalog(base: AIModelSettings | None = None) -> AIModelSettings:
             "stt_fallback_id": stt_fallback,
             "tts_primary_id": tts_primary,
             "tts_fallback_id": tts_fallback,
+            "tts_hi_primary_id": tts_hi_primary,
+            "tts_hi_fallback_id": tts_hi_fallback,
         }
     )
     return AIModelSettings.model_validate(data)
@@ -251,6 +279,34 @@ def _normalize_chat_entry(entry: AICatalogEntry) -> AICatalogEntry:
     return entry.model_copy(update=updates) if updates else entry
 
 
+def infer_tts_language(model_id: str | None = None, language: str | None = None) -> str:
+    raw = str(language or "").strip().casefold()
+    if raw in {"hi", "hi-in", "hindi"}:
+        return "hi"
+    if raw in {"en", "en-in", "english"}:
+        return "en"
+    mid = str(model_id or "").strip().casefold()
+    if mid.startswith("hi-") or mid.startswith("hi_"):
+        return "hi"
+    return "en"
+
+
+def entry_language(entry: AICatalogEntry | None) -> str:
+    if entry is None:
+        return "en"
+    return infer_tts_language(
+        getattr(entry, "model_id", None),
+        getattr(entry, "language", None),
+    )
+
+
+def _normalize_tts_entry(entry: AICatalogEntry) -> AICatalogEntry:
+    lang = infer_tts_language(entry.model_id, entry.language)
+    if entry.language == lang:
+        return entry
+    return entry.model_copy(update={"language": lang})
+
+
 def hydrate_catalog(payload: AIModelSettings) -> AIModelSettings:
     defaults = default_catalog(payload)
     data = payload.model_dump()
@@ -265,6 +321,8 @@ def hydrate_catalog(payload: AIModelSettings) -> AIModelSettings:
                     entry = AICatalogEntry.model_validate(item)
                     if kind == "chat":
                         entry = _normalize_chat_entry(entry)
+                    elif kind == "tts":
+                        entry = _normalize_tts_entry(entry)
                     stored.append(entry)
                 except Exception:
                     logger.warning("Skipping invalid %s catalog entry: %s", kind, item)
@@ -277,6 +335,12 @@ def hydrate_catalog(payload: AIModelSettings) -> AIModelSettings:
     chat_ids = _index_models(chat_models)
     stt_ids = _index_models(stt_models)
     tts_ids = _index_models(tts_models)
+    tts_en_ids = {
+        key: entry for key, entry in tts_ids.items() if entry_language(entry) == "en"
+    }
+    tts_hi_ids = {
+        key: entry for key, entry in tts_ids.items() if entry_language(entry) == "hi"
+    }
 
     def pick(current: str, fallback: str, available: dict[str, AICatalogEntry]) -> str:
         if current in available:
@@ -293,10 +357,32 @@ def hydrate_catalog(payload: AIModelSettings) -> AIModelSettings:
     stt_fallback = pick(data.get("stt_fallback_id") or "", defaults.stt_fallback_id, stt_ids)
     if stt_fallback == stt_primary:
         stt_fallback = next((key for key in stt_ids if key != stt_primary), "")
-    tts_primary = pick(data.get("tts_primary_id") or "", defaults.tts_primary_id, tts_ids)
-    tts_fallback = pick(data.get("tts_fallback_id") or "", defaults.tts_fallback_id, tts_ids)
+    tts_primary = pick(
+        data.get("tts_primary_id") or "",
+        defaults.tts_primary_id,
+        tts_en_ids or tts_ids,
+    )
+    tts_fallback = pick(
+        data.get("tts_fallback_id") or "",
+        defaults.tts_fallback_id,
+        tts_en_ids or tts_ids,
+    )
     if tts_fallback == tts_primary:
-        tts_fallback = next((key for key in tts_ids if key != tts_primary), "")
+        tts_fallback = next((key for key in (tts_en_ids or tts_ids) if key != tts_primary), "")
+    tts_hi_primary = pick(
+        data.get("tts_hi_primary_id") or "",
+        defaults.tts_hi_primary_id,
+        tts_hi_ids,
+    )
+    tts_hi_fallback = pick(
+        data.get("tts_hi_fallback_id") or "",
+        defaults.tts_hi_fallback_id,
+        tts_hi_ids,
+    )
+    if tts_hi_fallback == tts_hi_primary:
+        tts_hi_fallback = next(
+            (key for key in tts_hi_ids if key != tts_hi_primary), ""
+        )
 
     primary_chat = chat_ids.get(chat_primary)
     primary_stt = stt_ids.get(stt_primary)
@@ -312,6 +398,8 @@ def hydrate_catalog(payload: AIModelSettings) -> AIModelSettings:
             "stt_fallback_id": stt_fallback,
             "tts_primary_id": tts_primary,
             "tts_fallback_id": tts_fallback,
+            "tts_hi_primary_id": tts_hi_primary,
+            "tts_hi_fallback_id": tts_hi_fallback,
         }
     )
     if primary_chat:
@@ -373,8 +461,8 @@ def interviewer_display_name(entry: AICatalogEntry | None) -> str:
     return name
 
 
-def primary_interviewer_name() -> str:
-    targets = ordered_targets("tts")
+def primary_interviewer_name(language: str | None = None) -> str:
+    targets = ordered_tts_targets(language)
     return interviewer_display_name(targets[0] if targets else None)
 
 
@@ -385,7 +473,10 @@ def voice_for_entry(entry: AICatalogEntry | None) -> str:
     if raw in {"female", "male"}:
         return raw
     model_id = str(entry.model_id or "").casefold()
-    if "prabhat" in model_id or "aarav" in model_id or "kunal" in model_id:
+    if any(
+        token in model_id
+        for token in ("prabhat", "aarav", "kunal", "madhur", "arjun", "rehaan")
+    ):
         return "male"
     return "female"
 
@@ -396,11 +487,50 @@ def catalog_entry(kind: str, entry_id: str) -> AICatalogEntry | None:
     return next((item for item in models if item.id == entry_id), None)
 
 
-def ordered_targets(kind: str) -> list[AICatalogEntry]:
+def ordered_tts_targets(language: str | None = None) -> list[AICatalogEntry]:
+    """TTS try order for one interview language (en or hi)."""
+    lang = infer_tts_language(language=language)
+    catalog = get_runtime_catalog()
+    models = [
+        entry
+        for entry in list(getattr(catalog, "tts_models", []) or [])
+        if entry_language(entry) == lang
+    ]
+    if not models:
+        # No language-tagged rows yet — fall back to all TTS (legacy catalogs).
+        models = list(getattr(catalog, "tts_models", []) or [])
+    if lang == "hi":
+        primary_id = str(getattr(catalog, "tts_hi_primary_id", "") or "")
+        fallback_id = str(getattr(catalog, "tts_hi_fallback_id", "") or "")
+    else:
+        primary_id = str(getattr(catalog, "tts_primary_id", "") or "")
+        fallback_id = str(getattr(catalog, "tts_fallback_id", "") or "")
+    by_id = _index_models(models)
+    ordered: list[AICatalogEntry] = []
+    seen: set[str] = set()
+
+    def _add(entry: AICatalogEntry | None) -> None:
+        if entry is None or not entry.enabled or entry.id in seen:
+            return
+        ordered.append(entry)
+        seen.add(entry.id)
+
+    _add(by_id.get(primary_id))
+    _add(by_id.get(fallback_id))
+    for entry in models:
+        _add(entry)
+    return ordered
+
+
+def ordered_targets(kind: str, language: str | None = None) -> list[AICatalogEntry]:
     """Try order: first preference → named fallback → all other enabled catalog rows.
 
     Extra ON models are backups after the two dropdowns (traffic / server errors only).
+    For TTS, pass interview language so Hindi/English preferences stay separate.
     """
+    if kind == "tts":
+        return ordered_tts_targets(language)
+
     catalog = get_runtime_catalog()
     models = list(getattr(catalog, f"{kind}_models", []) or [])
     primary_id = str(getattr(catalog, f"{kind}_primary_id", "") or "")
