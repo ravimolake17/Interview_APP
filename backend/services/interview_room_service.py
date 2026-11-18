@@ -112,6 +112,31 @@ def verify_agent5_prerequisites(session_id: str, payload: dict[str, Any]) -> Non
             )
 
 
+# Mid-interview overrun: do not 410 an answer/transcribe just because the
+# scheduled join/link window ended while the candidate was still speaking.
+_LIVE_ROOM_RUNTIME_STATES = frozenset({AI_INTERVIEW_ACTIVE, AI_PAUSED, HR_INTERVENTION})
+_LIVE_AGENT5_SESSION_STATUSES = frozenset({"active", "terminating"})
+
+
+def _agent5_session_status(runtime: dict[str, Any]) -> str | None:
+    """Best-effort Agent5 session status for join-window overrun bypass."""
+    session_id = str(runtime.get("agent5_session_id") or "").strip()
+    if not session_id:
+        return None
+    try:
+        from agents.proctoring_agent.db import SessionLocal
+        from agents.proctoring_agent.models import InterviewSession
+
+        with SessionLocal() as pdb:
+            session = pdb.get(InterviewSession, session_id)
+            if session is None:
+                return None
+            return str(session.status or "").strip().lower() or None
+    except Exception:
+        logger.debug("Agent5 session status lookup skipped", exc_info=True)
+        return None
+
+
 async def require_scheduled_interview(db: AsyncSession, candidate_id: str) -> tuple[Candidate, Interview]:
     candidate = await db.scalar(select(Candidate).where(Candidate.candidate_id == candidate_id))
     if candidate is None:
@@ -125,14 +150,25 @@ async def require_scheduled_interview(db: AsyncSession, candidate_id: str) -> tu
         raise HTTPException(status_code=409, detail="No scheduled interview was found for this candidate.")
     if interview.status != InterviewStatus.SCHEDULED:
         raise HTTPException(status_code=409, detail="This interview is no longer active.")
-    expires_at = interview.join_token_expires_at
-    if expires_at is not None:
-        expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-        if _utcnow() > expiry:
-            raise HTTPException(status_code=410, detail="This interview link has expired.")
 
-    # First join by scheduled end; rejoin by first_start + duration; open visit OK.
     runtime = runtime_from_snapshot(candidate)
+    runtime_state = str(runtime.get("state") or "").strip().upper()
+    agent5_status = _agent5_session_status(runtime)
+    live_runtime = runtime_state in _LIVE_ROOM_RUNTIME_STATES
+    live_agent5 = agent5_status in _LIVE_AGENT5_SESSION_STATUSES
+    open_visit = bool(runtime.get("room_visit_open"))
+
+    # Join-link expiry applies to *entering* the room, not finishing a live turn.
+    # Long answers that cross scheduled end previously got 410 on /ai/answer while
+    # the STT WebSocket (accepted earlier) still returned a full transcript.
+    if not (live_runtime or live_agent5 or open_visit):
+        expires_at = interview.join_token_expires_at
+        if expires_at is not None:
+            expiry = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+            if _utcnow() > expiry:
+                raise HTTPException(status_code=410, detail="This interview link has expired.")
+
+    # First join by scheduled end; rejoin by first_start + duration; live session may overrun.
     from services.blueprint_service import BlueprintService
     from services.join_token_service import (
         assert_candidate_entry_allowed,
@@ -143,16 +179,19 @@ async def require_scheduled_interview(db: AsyncSession, candidate_id: str) -> tu
     company_settings = await ApplicationSettingsService(db).get_company(candidate.company_id)
     tz_name = getattr(company_settings, "timezone", None)
     duration = await BlueprintService(db).planned_duration_minutes(candidate_id)
+    # Full join-window bypass only for a confirmed live interview (not stale ready+open).
+    session_status = agent5_status if live_agent5 else ("active" if live_runtime else None)
     assert_candidate_entry_allowed(
         scheduled_date=interview.scheduled_date,
         scheduled_time=interview.scheduled_time,
         duration_minutes=duration,
         tz_name=tz_name,
-        room_visit_open=bool(runtime.get("room_visit_open")),
+        room_visit_open=open_visit,
         first_started_at=parse_runtime_datetime(
             runtime.get("first_room_join_at"),
             tz_name=tz_name,
         ),
+        session_status=session_status,
     )
 
     return candidate, interview
