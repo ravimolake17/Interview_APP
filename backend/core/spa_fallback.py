@@ -12,7 +12,8 @@ SPA_SKIP_ROOTS = frozenset(
         "openapi.json",
         "health",
         "ready",
-        "screening",
+        # "screening" is the HR React SPA route (/screening) — do not skip it.
+        "screening-legacy",
         "screening-files",
         "proctoring",
         "monitor",

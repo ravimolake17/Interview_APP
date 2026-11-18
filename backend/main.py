@@ -373,10 +373,15 @@ if settings.agent5_embedded:
 else:
     logger.info("AGENT5_EMBEDDED=false — camera/WebSocket routes are served by the standalone proctoring process")
 
-# Screening recruiter UI (static HTML)
+# Legacy Agent-1 static HTML (optional). Must NOT mount at /screening — that path
+# belongs to the HR React SPA; mounting StaticFiles there breaks refresh on /screening.
 screening_ui_dir = Path(__file__).resolve().parent.parent / "frontend" / "screening"
 if screening_ui_dir.exists():
-    app.mount("/screening", StaticFiles(directory=screening_ui_dir, html=True), name="screening-ui")
+    app.mount(
+        "/screening-legacy",
+        StaticFiles(directory=screening_ui_dir, html=True),
+        name="screening-ui",
+    )
 
 screening_uploads_dir = get_uploads_root()
 app.mount("/screening-files", StaticFiles(directory=screening_uploads_dir), name="screening-files")
@@ -395,7 +400,7 @@ async def home():
             "agent_1": {
                 "name": "Resume Screening ATS",
                 "version": screening_settings.APP_VERSION,
-                "ui": "/screening/",
+                "ui": "/screening",
                 "evaluate": "POST /api/candidates/evaluate",
                 "evaluate_async": "POST /api/candidates/evaluate/async",
                 "evaluate_batch": "POST /api/candidates/evaluate/batch/async",
