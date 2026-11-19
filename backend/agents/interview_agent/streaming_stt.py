@@ -73,9 +73,9 @@ def _segmentation_silence_ms() -> int:
     try:
         from core.config import get_settings
 
-        value = int(getattr(get_settings(), "stt_stream_segmentation_silence_ms", 1200) or 1200)
+        value = int(getattr(get_settings(), "stt_stream_segmentation_silence_ms", 800) or 800)
     except Exception:
-        value = 1200
+        value = 800
     return max(100, min(5000, value))
 
 
@@ -83,9 +83,9 @@ def _initial_silence_ms() -> int:
     try:
         from core.config import get_settings
 
-        value = int(getattr(get_settings(), "stt_stream_initial_silence_ms", 8000) or 8000)
+        value = int(getattr(get_settings(), "stt_stream_initial_silence_ms", 10000) or 10000)
     except Exception:
-        value = 8000
+        value = 10000
     return max(1000, min(30_000, value))
 
 
@@ -96,9 +96,9 @@ def end_silence_ms() -> int:
     try:
         from core.config import get_settings
 
-        value = int(getattr(get_settings(), "interview_stt_end_silence_ms", 2500) or 2500)
+        value = int(getattr(get_settings(), "interview_stt_end_silence_ms", 2000) or 2000)
     except Exception:
-        value = 2500
+        value = 2000
     return max(800, min(10_000, value))
 
 

@@ -93,10 +93,10 @@ class Settings(BaseSettings):
     # Env alias: INTERVIEW_STT_MODE
     interview_stt_mode: str = "batch"
     # Azure continuous recognition segmentation silence (100–5000 ms).
-    stt_stream_segmentation_silence_ms: int = 1200
-    stt_stream_initial_silence_ms: int = 8000
+    stt_stream_segmentation_silence_ms: int = 800
+    stt_stream_initial_silence_ms: int = 10000
     # Browser end-of-answer silence before stop (env: INTERVIEW_STT_END_SILENCE_MS).
-    interview_stt_end_silence_ms: int = 2500
+    interview_stt_end_silence_ms: int = 2000
     # Wait for Azure final events after push-stream close (env: INTERVIEW_STT_FINALIZATION_TIMEOUT_MS).
     interview_stt_finalization_timeout_ms: int = 5000
 

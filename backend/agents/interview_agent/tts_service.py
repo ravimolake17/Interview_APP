@@ -364,8 +364,12 @@ _EXPRESSIVE_STYLES: dict[str, str] = {
 }
 
 # Keep default speaking speed (user prefers current pace). Only emotion + quality.
-_TTS_STYLE_DEGREE = os.getenv("TTS_STYLE_DEGREE", "1.4").strip() or "1.4"
+# Degrees above ~1.2 sound over-acted (another source of the "robotic" feel).
+_TTS_STYLE_DEGREE = os.getenv("TTS_STYLE_DEGREE", "1.1").strip() or "1.1"
 _TTS_STYLE = os.getenv("TTS_STYLE", "empathetic").strip().casefold() or "empathetic"
+# Natural breathing gaps between clauses/sentences; trims dead air at start/end.
+_TTS_SENTENCE_PAUSE_MS = os.getenv("TTS_SENTENCE_PAUSE_MS", "320").strip() or "320"
+_TTS_COMMA_PAUSE_MS = os.getenv("TTS_COMMA_PAUSE_MS", "160").strip() or "160"
 
 
 def build_interview_ssml(text: str, *, voice_name: str, xml_lang: str) -> str:
@@ -382,15 +386,22 @@ def build_interview_ssml(text: str, *, voice_name: str, xml_lang: str) -> str:
     if style and _TTS_STYLE in {"empathetic", "cheerful", "newscast"}:
         # Allow env override of style name when the voice supports express-as.
         style = _TTS_STYLE if key in _EXPRESSIVE_STYLES else style
+    pauses = (
+        '<mstts:silence type="Leading-exact" value="50ms"/>'
+        '<mstts:silence type="Tailing-exact" value="80ms"/>'
+        f'<mstts:silence type="Sentenceboundary-exact" value="{xml_escape(_TTS_SENTENCE_PAUSE_MS)}ms"/>'
+        f'<mstts:silence type="Comma-exact" value="{xml_escape(_TTS_COMMA_PAUSE_MS)}ms"/>'
+    )
     if style:
         inner = (
+            f"{pauses}"
             f'<mstts:express-as style="{xml_escape(style)}" '
             f'styledegree="{xml_escape(_TTS_STYLE_DEGREE)}">'
             f"{body}"
             f"</mstts:express-as>"
         )
     else:
-        inner = body
+        inner = f"{pauses}{body}"
     return (
         f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
         f'xmlns:mstts="https://www.w3.org/2001/mstts" xml:lang="{lang}">'

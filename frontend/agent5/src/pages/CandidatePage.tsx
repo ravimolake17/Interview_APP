@@ -121,8 +121,63 @@ const ANSWER_OVERTIME_PAUSE_MS = 900
 /** Batch partial STT re-sends the whole growing blob; stop partials past this length. */
 const MAX_PARTIAL_STT_MS = 60_000
 /** After Azure reports end of speech, wait this long for more words before ending the turn. */
-const AZURE_END_OF_TURN_GRACE_MS = 1_300
-const DEFAULT_END_SILENCE_MS = 2500
+const AZURE_END_OF_TURN_GRACE_MS = 1_000
+/**
+ * Azure emits a final segment ~800 ms after the candidate pauses (server segmentation
+ * silence). Waiting this much longer gives ~2 s of total quiet before the next question.
+ */
+const SEGMENT_END_OF_TURN_GRACE_MS = 1_200
+/** "I don't know" / "skip" — move on almost immediately. */
+const SKIP_INTENT_GRACE_MS = 400
+const DEFAULT_END_SILENCE_MS = 2000
+
+const SKIP_INTENT_PATTERN = new RegExp(
+  [
+    "i\\s*(?:do\\s*not|don'?t|dont)\\s*know",
+    'no\\s*idea',
+    'not\\s*sure',
+    "(?:i\\s*)?(?:can'?t|cannot)\\s*answer",
+    'skip(?:\\s*(?:it|this|the\\s*question))?',
+    'next\\s*question',
+    'move\\s*on',
+    "i(?:'?ll)?\\s*pass",
+    "i\\s*(?:have\\s*)?(?:never|not)\\s*(?:worked|used|done)\\s*(?:on|with)?\\s*(?:it|this|that)",
+    'पता\\s*नहीं',
+    'मुझे\\s*नहीं\\s*पता',
+    'नहीं\\s*पता',
+    'अगला\\s*(?:सवाल|प्रश्न)',
+    'छोड़\\s*(?:दो|दीजिए|दें)',
+    'skip\\s*(?:karo|kar\\s*do|kijiye)',
+    'pata\\s*nahi',
+  ].join('|'),
+  'gi',
+)
+
+const SKIP_FILLER_WORDS = new Set([
+  'sorry', 'actually', 'honestly', 'really', 'um', 'umm', 'uh', 'hmm', 'okay', 'ok',
+  'sir', 'maam', 'mam', 'please', 'yeah', 'yes', 'so', 'i', 'am', 'the', 'this', 'that',
+  'it', 'question', 'one', 'now', 'can', 'we', 'let', 'lets', 'answer', 'next', 'go', 'to',
+  'जी', 'सर', 'माफ़', 'करना', 'कीजिए', 'है', 'यह',
+])
+
+/** True when the short utterance is only "I don't know" / "skip" plus filler words. */
+function isSkipIntent(text: string): boolean {
+  const cleaned = text
+    .toLowerCase()
+    .replace(/[.,!?।"`]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned || cleaned.split(' ').length > 10) return false
+  SKIP_INTENT_PATTERN.lastIndex = 0
+  if (!SKIP_INTENT_PATTERN.test(cleaned)) return false
+  SKIP_INTENT_PATTERN.lastIndex = 0
+  const leftover = cleaned
+    .replace(SKIP_INTENT_PATTERN, ' ')
+    .replace(/'/g, '')
+    .split(/\s+/)
+    .filter((word) => word && !SKIP_FILLER_WORDS.has(word))
+  return leftover.length === 0
+}
 
 /** True when the failure means no usable spoken words were captured. */
 function isNoAnswerHeardError(error: unknown): boolean {
@@ -2434,6 +2489,21 @@ export function CandidatePage() {
           if (azureEndTimerRef.current) window.clearTimeout(azureEndTimerRef.current)
           azureEndTimerRef.current = null
         }
+        const scheduleEndOfTurn = (delayMs: number, reason: string) => {
+          if (!capturingAnswerRef.current || submittingAnswerRef.current) return
+          if (!liveTranscriptAccRef.current.displayText().trim()) return
+          cancelAzureEndOfTurn()
+          azureEndTimerRef.current = window.setTimeout(() => {
+            azureEndTimerRef.current = null
+            if (!capturingAnswerRef.current || submittingAnswerRef.current) return
+            if (leavingInterviewRef.current || hangingUpRef.current) return
+            const turn = latencyTurnRef.current || createInterviewTurnTrace(credentialsRef.current?.sessionId || '')
+            turn.mark('candidate_speech_end')
+            turn.mark(reason)
+            latencyTurnRef.current = turn
+            void submitAnswerCaptureRef.current?.()
+          }, delayMs)
+        }
         const client = new StreamingSttClient(current.sessionId, current.token, {
           onPartial: (text) => {
             if (!text) return
@@ -2441,12 +2511,22 @@ export function CandidatePage() {
             liveTranscriptAccRef.current.setPartial(text)
             liveAnswerTranscriptRef.current = liveTranscriptAccRef.current.displayText()
             silenceMonitorRef.current?.markSpeech()
+            // Skip phrases end the turn quickly; any further words cancel and re-arm.
+            if (isSkipIntent(liveAnswerTranscriptRef.current)) {
+              scheduleEndOfTurn(SKIP_INTENT_GRACE_MS + 400, 'skip_intent')
+            }
           },
           onSegment: (text) => {
             if (!text) return
             liveTranscriptAccRef.current.addFinalSegment(text)
             liveAnswerTranscriptRef.current = liveTranscriptAccRef.current.displayText()
             silenceMonitorRef.current?.markSpeech()
+            // A final segment means Azure already heard a pause — end after a short grace.
+            const skip = isSkipIntent(liveAnswerTranscriptRef.current)
+            scheduleEndOfTurn(
+              skip ? SKIP_INTENT_GRACE_MS : SEGMENT_END_OF_TURN_GRACE_MS,
+              skip ? 'skip_intent' : 'segment_end_of_turn',
+            )
           },
           onVad: (state) => {
             if (state === 'start') {
@@ -2454,20 +2534,7 @@ export function CandidatePage() {
               silenceMonitorRef.current?.markSpeech()
               return
             }
-            // Azure saw a speech boundary. End the turn after a short grace period unless more words arrive.
-            if (!capturingAnswerRef.current || submittingAnswerRef.current) return
-            if (!liveTranscriptAccRef.current.displayText().trim()) return
-            cancelAzureEndOfTurn()
-            azureEndTimerRef.current = window.setTimeout(() => {
-              azureEndTimerRef.current = null
-              if (!capturingAnswerRef.current || submittingAnswerRef.current) return
-              if (leavingInterviewRef.current || hangingUpRef.current) return
-              const turn = latencyTurnRef.current || createInterviewTurnTrace(credentialsRef.current?.sessionId || '')
-              turn.mark('candidate_speech_end')
-              turn.mark('azure_end_of_turn')
-              latencyTurnRef.current = turn
-              void submitAnswerCaptureRef.current?.()
-            }, AZURE_END_OF_TURN_GRACE_MS)
+            scheduleEndOfTurn(AZURE_END_OF_TURN_GRACE_MS, 'azure_end_of_turn')
           },
           onError: (message, code) => {
             console.warn('Streaming STT error', code, message)
@@ -2595,6 +2662,9 @@ export function CandidatePage() {
               }
               if (text && text.length > lastPartialTextLenRef.current) {
                 silenceMonitorRef.current?.markSpeech()
+              }
+              if (text && isSkipIntent(text) && capturingAnswerRef.current && !submittingAnswerRef.current) {
+                void submitAnswerCaptureRef.current?.()
               }
               lastPartialTextLenRef.current = text.length
               lastPartialBlobSizeRef.current = blob.size
