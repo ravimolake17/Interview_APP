@@ -49,6 +49,8 @@ async def _agent5_session_finished(db: AsyncSession, session_id: str | None) -> 
     if not session_id:
         return False
     try:
+        # Cap wait so a locked/missing agent5 schema cannot stall HR candidate pages.
+        await db.execute(text("SET LOCAL statement_timeout = '1500ms'"))
         row = (
             await db.execute(
                 text(

@@ -72,6 +72,24 @@ class RecommendationAgentService:
             report = HrRecommendationReport.model_validate(row.report_json or {})
         if report is None:
             report = HrRecommendationReport()
+        # Older report_json may omit identity fields — always stamp from candidate.
+        status_value = str(getattr(candidate.status, "value", candidate.status) or "")
+        status_labels = {
+            "INTERVIEW_COMPLETED": "Interview Completed",
+            "INTERVIEW_SCHEDULED": "Interview Scheduled",
+            "NEEDS_REVIEW": "Needs Review",
+            "SHORTLISTED": "Shortlisted",
+            "REJECTED": "Rejected",
+            "PENDING": "Pending",
+        }
+        report = report.model_copy(
+            update={
+                "candidate_id": report.candidate_id or candidate.candidate_id,
+                "full_name": report.full_name or (candidate.full_name or ""),
+                "candidate_status": report.candidate_status
+                or status_labels.get(status_value, status_value.replace("_", " ").title()),
+            }
+        )
         return HrRecommendationResponse(
             candidate_id=candidate.candidate_id,
             report_id=row.id if row else None,

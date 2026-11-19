@@ -194,12 +194,17 @@ async def _build_summary(
     interview_repo = InterviewRepository(db)
     token_repo = TokenRepository(db)
     interview = await interview_repo.get_by_candidate_id(candidate.candidate_id)
+    # Fast paths first — avoid the expensive finish-detection query on every open.
     interview_completed = bool(
-        (interview and interview.status == InterviewStatus.COMPLETED)
+        candidate.status == CandidateStatus.INTERVIEW_COMPLETED
+        or (interview and interview.status == InterviewStatus.COMPLETED)
         or snapshot_shows_completed(candidate.evaluation_snapshot)
-        or candidate.status == CandidateStatus.INTERVIEW_COMPLETED
-        or await has_finished_interview(db, candidate)
     )
+    if (
+        not interview_completed
+        and candidate.status == CandidateStatus.INTERVIEW_SCHEDULED
+    ):
+        interview_completed = await has_finished_interview(db, candidate)
     interview_scheduled = bool(
         interview
         and interview.status == InterviewStatus.SCHEDULED
@@ -711,6 +716,7 @@ async def get_dashboard_stats(
     ]
 
     total = len(candidates)
+    # status_counts already built above; sync_completed_interviews() ran at start.
     shortlisted = status_counts.get(CandidateStatus.SHORTLISTED.value, 0)
     interview_scheduled = status_counts.get(CandidateStatus.INTERVIEW_SCHEDULED.value, 0)
     interview_completed = status_counts.get(CandidateStatus.INTERVIEW_COMPLETED.value, 0)
@@ -739,9 +745,10 @@ async def get_dashboard_stats(
     booked = interview_scheduled
     for candidate in candidates:
         has_token = candidate.candidate_id in token_ids
-        if candidate.status == CandidateStatus.INTERVIEW_SCHEDULED or (
-            candidate.status == CandidateStatus.SHORTLISTED and has_token
-        ):
+        if candidate.status in {
+            CandidateStatus.INTERVIEW_SCHEDULED,
+            CandidateStatus.INTERVIEW_COMPLETED,
+        } or (candidate.status == CandidateStatus.SHORTLISTED and has_token):
             issued += 1
         if candidate.status == CandidateStatus.SHORTLISTED and not has_token:
             not_issued += 1

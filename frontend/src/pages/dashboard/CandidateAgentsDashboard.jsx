@@ -30,7 +30,6 @@ import {
 } from 'lucide-react';
 import EvaluationDetailPanels from '../../components/ui/EvaluationDetailPanels';
 import { MatchScore, StatusBadge, RecommendationBadge } from '../../components/ui/Badges';
-import LoadingSpinner from '../../components/LoadingSpinner';
 import EmptyState from '../../components/ui/EmptyState';
 import Modal from '../../components/ui/Modal';
 import {
@@ -51,6 +50,7 @@ import {
   speakInterviewText,
   prepareInterviewTTS,
   getEvaluationAgentStatus,
+  evaluatePendingOralAnswers,
   listInterviewEvaluations,
   getOralAnswerAudio,
   getRecommendationAgentStatus,
@@ -181,7 +181,8 @@ function answerKindLabel(kind) {
   return 'Oral';
 }
 
-function answerStatusLabel(status) {
+function answerStatusLabel(status, verdict) {
+  if (verdict === 'pending' || status === 'pending') return 'Pending score';
   if (status === 'answered') return 'Answered';
   if (status === 'skipped') return 'Skipped';
   return 'Not answered';
@@ -298,13 +299,17 @@ function MetaRow({ icon: Icon, label, value, href }) {
 export default function CandidateAgentsDashboard() {
   const { candidateId } = useParams();
   const navigate = useNavigate();
-  const { addToast, refreshData, workingCompanyId } = useApp();
+  const { addToast, refreshData, workingCompanyId, candidates } = useApp();
   const { user } = useAuth();
   const showInterviewLab = isSuperAdmin(user?.role);
 
-  const [candidate, setCandidate] = useState(null);
+  const cachedCandidate = candidates.find(
+    (row) => row.id === candidateId || row.candidateId === candidateId,
+  ) || null;
+
+  const [candidate, setCandidate] = useState(cachedCandidate);
   const [blueprint, setBlueprint] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(!cachedCandidate);
   const [blueprintLoading, setBlueprintLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [resending, setResending] = useState(false);
@@ -337,6 +342,7 @@ export default function CandidateAgentsDashboard() {
   const [agent7, setAgent7] = useState(null);
   const [agent7Loading, setAgent7Loading] = useState(false);
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [scoringPending, setScoringPending] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [activeAgent, setActiveAgent] = useState(1);
   const [isRecording, setIsRecording] = useState(false);
@@ -356,6 +362,11 @@ export default function CandidateAgentsDashboard() {
   const recordPreviewUrlRef = useRef(null);
   const autoQuestionsRef = useRef(false);
   const autoPlanRef = useRef(false);
+  const loadSeqRef = useRef(0);
+  const candidatesRef = useRef(candidates);
+  candidatesRef.current = candidates;
+  const agentLoadStateRef = useRef({});
+  const mappedRef = useRef(cachedCandidate);
 
   const STREAM_INTERVAL_MS = 3000;
   const MIN_PARTIAL_BYTES = 8000;
@@ -375,192 +386,253 @@ export default function CandidateAgentsDashboard() {
     }
   }, []);
 
+  const interviewBookedFor = useCallback((mapped) => Boolean(
+    mapped?.scheduledDate || mapped?.meetingLink || mapped?.interviewScheduled,
+  ), []);
+
+  const loadBlueprint = useCallback(async (mapped) => {
+    if (!candidateId) return;
+    setBlueprintLoading(true);
+    try {
+      const [blueprintRes, availabilityRes] = await Promise.allSettled([
+        getCandidateBlueprint(candidateId),
+        getInterviewAvailability(),
+      ]);
+      const availabilityMinutes = Number(availabilityRes.status === 'fulfilled'
+        ? availabilityRes.value.data?.slot_minutes
+        : NaN);
+      if (Number.isFinite(availabilityMinutes) && availabilityMinutes > 0) {
+        setDefaultDuration(availabilityMinutes);
+      }
+      if (blueprintRes.status === 'fulfilled') {
+        setBlueprint(blueprintRes.value.data);
+        syncPlanEditors({
+          ...blueprintRes.value.data,
+          default_duration_minutes: Number.isFinite(availabilityMinutes)
+            ? availabilityMinutes
+            : blueprintRes.value.data?.default_duration_minutes,
+        });
+      } else if (blueprintRes.reason?.response?.status === 404) {
+        setBlueprint(null);
+        setEditLevel('Entry-level');
+        setEditDuration(
+          Number.isFinite(availabilityMinutes) ? availabilityMinutes : DEFAULT_DURATION_MINUTES,
+        );
+        if (interviewBookedFor(mapped) && !autoPlanRef.current) {
+          autoPlanRef.current = true;
+          try {
+            const generated = await generateCandidateBlueprint(candidateId, { force: false });
+            setBlueprint(generated.data);
+            syncPlanEditors({
+              ...generated.data,
+              default_duration_minutes: Number.isFinite(availabilityMinutes)
+                ? availabilityMinutes
+                : generated.data?.default_duration_minutes,
+            });
+          } catch {
+            autoPlanRef.current = false;
+          }
+        }
+      }
+    } catch {
+      setBlueprint(null);
+    } finally {
+      setBlueprintLoading(false);
+    }
+  }, [candidateId, interviewBookedFor, syncPlanEditors]);
+
+  const loadAgent4 = useCallback(async (mapped) => {
+    if (!candidateId) return;
+    setAgent4Loading(true);
+    try {
+      const statusRes = await getInterviewAgentStatus(candidateId);
+      setAgent4(statusRes.data);
+      const qs = statusRes.data?.question_set?.questions || [];
+      if (qs.length) {
+        setSelectedQuestionId(qs[0].id);
+      } else if (
+        interviewBookedFor(mapped)
+        && statusRes.data?.blueprint_ready
+        && !autoQuestionsRef.current
+      ) {
+        autoQuestionsRef.current = true;
+        setGeneratingQuestions(true);
+        try {
+          const { data } = await generateInterviewQuestions(candidateId, false);
+          setAgent4((prev) => ({
+            ...(prev || {}),
+            blueprint_ready: true,
+            questions_ready: true,
+            speak_ready: Boolean(data.tts_ready),
+            question_set: data,
+          }));
+          if (data.questions?.length) setSelectedQuestionId(data.questions[0].id);
+        } catch {
+          autoQuestionsRef.current = false;
+        } finally {
+          setGeneratingQuestions(false);
+        }
+      }
+    } catch {
+      setAgent4(null);
+    } finally {
+      setAgent4Loading(false);
+    }
+  }, [candidateId, interviewBookedFor]);
+
+  const loadAgent5 = useCallback(async () => {
+    if (!candidateId) return;
+    setAgent5Loading(true);
+    try {
+      const fraudRes = await getFraudAgentStatus(candidateId);
+      setAgent5(fraudRes.data);
+    } catch {
+      setAgent5(null);
+    } finally {
+      setAgent5Loading(false);
+    }
+  }, [candidateId]);
+
+  const loadAgent6 = useCallback(async () => {
+    if (!candidateId) return;
+    setAgent6Loading(true);
+    try {
+      const [statusRes, evalRes] = await Promise.all([
+        getEvaluationAgentStatus(candidateId),
+        listInterviewEvaluations(candidateId),
+      ]);
+      setAgent6(statusRes.data);
+      setEvaluations(evalRes.data?.evaluations || []);
+      if (evalRes.data?.report || statusRes.data?.report) {
+        setAgent6((prev) => ({
+          ...(prev || statusRes.data || {}),
+          report: evalRes.data?.report || statusRes.data?.report,
+        }));
+      }
+    } catch {
+      setAgent6(null);
+      setEvaluations([]);
+    } finally {
+      setAgent6Loading(false);
+    }
+  }, [candidateId]);
+
+  const loadAgent7 = useCallback(async () => {
+    if (!candidateId) return;
+    setAgent7Loading(true);
+    try {
+      const recRes = await getRecommendationAgentStatus(candidateId);
+      setAgent7(recRes.data);
+    } catch {
+      setAgent7(null);
+    } finally {
+      setAgent7Loading(false);
+    }
+  }, [candidateId]);
+
+  const loadRoomRuntime = useCallback(async () => {
+    if (!candidateId) return;
+    try {
+      const runtimeRes = await getInterviewRoomRuntime(candidateId);
+      setRoomRuntime(runtimeRes.data);
+    } catch {
+      setRoomRuntime(null);
+    }
+  }, [candidateId]);
+
+  const ensureAgentLoaded = useCallback(async (agentNumber, { force = false } = {}) => {
+    const mapped = mappedRef.current;
+    if (!candidateId || !mapped) return;
+    const key = String(agentNumber);
+    if (!force && agentLoadStateRef.current[key] === 'loaded') return;
+    if (!force && agentLoadStateRef.current[key] === 'loading') return;
+    agentLoadStateRef.current[key] = 'loading';
+    try {
+      if (agentNumber === 3) await loadBlueprint(mapped);
+      else if (agentNumber === 4) await loadAgent4(mapped);
+      else if (agentNumber === 5) {
+        await Promise.allSettled([loadAgent5(), loadRoomRuntime()]);
+      } else if (agentNumber === 6) await loadAgent6();
+      else if (agentNumber === 7) await loadAgent7();
+      agentLoadStateRef.current[key] = 'loaded';
+    } catch {
+      agentLoadStateRef.current[key] = 'error';
+    }
+  }, [candidateId, loadAgent4, loadAgent5, loadAgent6, loadAgent7, loadBlueprint, loadRoomRuntime]);
+
+  const preloadAgentsProgressive = useCallback((mapped) => {
+    mappedRef.current = mapped;
+    // Priority order: planning + interview first, then proctoring, then eval/HR.
+    const order = [3, 4, 5, 6, 7];
+    order.forEach((agentNumber, index) => {
+      window.setTimeout(() => {
+        void ensureAgentLoaded(agentNumber);
+      }, index * 120);
+    });
+  }, [ensureAgentLoaded]);
+
+  const loadCandidateDetail = useCallback(async ({ silent = false } = {}) => {
+    if (!candidateId) return null;
+    const seq = ++loadSeqRef.current;
+    const listRow = candidatesRef.current.find(
+      (row) => row.id === candidateId || row.candidateId === candidateId,
+    );
+    if (!silent && !listRow) setDetailLoading(true);
+    if (!silent) setError('');
+    try {
+      const { data } = await getHRCandidateDetail(candidateId);
+      if (seq !== loadSeqRef.current) return null;
+      const mapped = mapCandidateFromBackend(data, data);
+      mappedRef.current = mapped;
+      setCandidate(mapped);
+      setDetailLoading(false);
+      return mapped;
+    } catch (err) {
+      if (seq !== loadSeqRef.current) return null;
+      if (!silent) {
+        const status = err.response?.status;
+        const timedOut = err.code === 'ECONNABORTED' || /timeout/i.test(String(err.message || ''));
+        const detail = err.response?.data?.detail;
+        const message = timedOut
+          ? 'The candidate request timed out. The profile may still exist — tap Retry.'
+          : (typeof detail === 'string' && detail.trim())
+            ? detail
+            : status === 404
+              ? 'Candidate not found for the current company.'
+              : 'Failed to load candidate agents dashboard.';
+        setError(message);
+        if (status === 404) {
+          setCandidate(null);
+          setBlueprint(null);
+          mappedRef.current = null;
+        }
+      }
+      setDetailLoading(false);
+      return null;
+    }
+  }, [candidateId]);
+
   const loadAll = useCallback(async (options = {}) => {
     if (!candidateId) return;
     const silent = Boolean(options.silent);
-    if (!silent) {
-      setLoading(true);
-      setError('');
+    const force = Boolean(options.force);
+    if (force) {
+      agentLoadStateRef.current = {};
+      autoQuestionsRef.current = false;
+      autoPlanRef.current = false;
     }
-    let mapped = null;
-    try {
-      const { data } = await getHRCandidateDetail(candidateId);
-      mapped = mapCandidateFromBackend(data, data);
-      setCandidate(mapped);
-    } catch (err) {
-      if (!silent) {
-        setError(err.response?.data?.detail || 'Failed to load candidate agents dashboard.');
-        setCandidate(null);
-        setBlueprint(null);
-      }
-      if (!silent) setLoading(false);
-      return;
-    }
-
-    // Show the shell as soon as candidate/screening data is ready; agents fill in as they land.
-    if (!silent) setLoading(false);
-
-    const interviewBooked = Boolean(
-      mapped.scheduledDate || mapped.meetingLink || mapped.interviewScheduled,
-    );
-
-    const loadBlueprint = async () => {
-      setBlueprintLoading(true);
-      try {
-        const [blueprintRes, availabilityRes] = await Promise.allSettled([
-          getCandidateBlueprint(candidateId),
-          getInterviewAvailability(),
-        ]);
-        const availabilityMinutes = Number(availabilityRes.status === 'fulfilled'
-          ? availabilityRes.value.data?.slot_minutes
-          : NaN);
-        if (Number.isFinite(availabilityMinutes) && availabilityMinutes > 0) {
-          setDefaultDuration(availabilityMinutes);
-        }
-        if (blueprintRes.status === 'fulfilled') {
-          setBlueprint(blueprintRes.value.data);
-          syncPlanEditors({
-            ...blueprintRes.value.data,
-            default_duration_minutes: Number.isFinite(availabilityMinutes)
-              ? availabilityMinutes
-              : blueprintRes.value.data?.default_duration_minutes,
-          });
-        } else if (blueprintRes.reason?.response?.status === 404) {
-          setBlueprint(null);
-          setEditLevel('Entry-level');
-          setEditDuration(
-            Number.isFinite(availabilityMinutes) ? availabilityMinutes : DEFAULT_DURATION_MINUTES,
-          );
-          if (interviewBooked && !autoPlanRef.current) {
-            autoPlanRef.current = true;
-            try {
-              const generated = await generateCandidateBlueprint(candidateId, { force: false });
-              setBlueprint(generated.data);
-              syncPlanEditors({
-                ...generated.data,
-                default_duration_minutes: Number.isFinite(availabilityMinutes)
-                  ? availabilityMinutes
-                  : generated.data?.default_duration_minutes,
-              });
-            } catch {
-              autoPlanRef.current = false;
-            }
-          }
-        }
-      } catch {
-        setBlueprint(null);
-      } finally {
-        setBlueprintLoading(false);
-      }
-    };
-
-    const loadAgent4 = async () => {
-      setAgent4Loading(true);
-      try {
-        const statusRes = await getInterviewAgentStatus(candidateId);
-        setAgent4(statusRes.data);
-        const qs = statusRes.data?.question_set?.questions || [];
-        if (qs.length) {
-          setSelectedQuestionId(qs[0].id);
-        } else if (
-          interviewBooked
-          && statusRes.data?.blueprint_ready
-          && !autoQuestionsRef.current
-        ) {
-          autoQuestionsRef.current = true;
-          setGeneratingQuestions(true);
-          try {
-            const { data } = await generateInterviewQuestions(candidateId, false);
-            setAgent4((prev) => ({
-              ...(prev || {}),
-              blueprint_ready: true,
-              questions_ready: true,
-              speak_ready: Boolean(data.tts_ready),
-              question_set: data,
-            }));
-            if (data.questions?.length) setSelectedQuestionId(data.questions[0].id);
-          } catch {
-            autoQuestionsRef.current = false;
-          } finally {
-            setGeneratingQuestions(false);
-          }
-        }
-      } catch {
-        setAgent4(null);
-      } finally {
-        setAgent4Loading(false);
-      }
-    };
-
-    const loadAgent6 = async () => {
-      setAgent6Loading(true);
-      try {
-        const [statusRes, evalRes] = await Promise.all([
-          getEvaluationAgentStatus(candidateId),
-          listInterviewEvaluations(candidateId),
-        ]);
-        setAgent6(statusRes.data);
-        setEvaluations(evalRes.data?.evaluations || []);
-        if (evalRes.data?.report || statusRes.data?.report) {
-          setAgent6((prev) => ({
-            ...(prev || statusRes.data || {}),
-            report: evalRes.data?.report || statusRes.data?.report,
-          }));
-        }
-      } catch {
-        setAgent6(null);
-        setEvaluations([]);
-      } finally {
-        setAgent6Loading(false);
-      }
-    };
-
-    const loadAgent7 = async () => {
-      setAgent7Loading(true);
-      try {
-        const recRes = await getRecommendationAgentStatus(candidateId);
-        setAgent7(recRes.data);
-      } catch {
-        setAgent7(null);
-      } finally {
-        setAgent7Loading(false);
-      }
-    };
-
-    const loadAgent5 = async () => {
-      setAgent5Loading(true);
-      try {
-        const fraudRes = await getFraudAgentStatus(candidateId);
-        setAgent5(fraudRes.data);
-      } catch {
-        setAgent5(null);
-      } finally {
-        setAgent5Loading(false);
-      }
-    };
-
-    const loadRoomRuntime = async () => {
-      try {
-        const runtimeRes = await getInterviewRoomRuntime(candidateId);
-        setRoomRuntime(runtimeRes.data);
-      } catch {
-        setRoomRuntime(null);
-      }
-    };
-
-    await Promise.allSettled([
-      loadBlueprint(),
-      loadAgent4(),
-      loadAgent6(),
-      loadAgent7(),
-      loadAgent5(),
-      loadRoomRuntime(),
-    ]);
-  }, [candidateId, syncPlanEditors]);
+    const mapped = await loadCandidateDetail({ silent });
+    if (!mapped) return;
+    // Progressive: shell is already visible; agents fill in by priority.
+    preloadAgentsProgressive(mapped);
+    // Also refresh the tab the user is looking at first.
+    void ensureAgentLoaded(activeAgent, { force: true });
+  }, [activeAgent, candidateId, ensureAgentLoaded, loadCandidateDetail, preloadAgentsProgressive]);
 
   useEffect(() => {
     autoQuestionsRef.current = false;
     autoPlanRef.current = false;
+    agentLoadStateRef.current = {};
     setBlueprint(null);
     setAgent4(null);
     setAgent6(null);
@@ -568,13 +640,28 @@ export default function CandidateAgentsDashboard() {
     setAgent5(null);
     setEvaluations([]);
     setRoomRuntime(null);
-    setBlueprintLoading(true);
-    setAgent4Loading(true);
-    setAgent6Loading(true);
-    setAgent7Loading(true);
-    setAgent5Loading(true);
-    loadAll();
-  }, [loadAll]);
+    setActiveAgent(1);
+    if (cachedCandidate) {
+      mappedRef.current = cachedCandidate;
+      setCandidate(cachedCandidate);
+      setDetailLoading(false);
+      setError('');
+    } else {
+      mappedRef.current = null;
+      setCandidate(null);
+      setDetailLoading(true);
+    }
+    void loadAll();
+    // Only remount-load when the route candidate changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candidateId]);
+
+  // Lazy-load the selected agent panel as the user clicks through the pipeline.
+  useEffect(() => {
+    if (!candidate) return;
+    if (activeAgent <= 2) return;
+    void ensureAgentLoaded(activeAgent);
+  }, [activeAgent, candidate, ensureAgentLoaded]);
 
   useEffect(() => {
     if (!candidate?.companyId || !workingCompanyId) return;
@@ -960,6 +1047,37 @@ export default function CandidateAgentsDashboard() {
     }
   };
 
+  const handleScorePendingOral = async (force = true) => {
+    if (!candidateId) return;
+    setScoringPending(true);
+    try {
+      const { data } = await evaluatePendingOralAnswers(candidateId, { force });
+      const queued = Number(data?.queued || 0);
+      const pending = Number(data?.pending_answers || 0);
+      if (queued > 0) {
+        addToast(`Queued ${queued} oral answer(s) for Agent 6 scoring. Refresh in a minute.`, 'success');
+      } else if (pending > 0) {
+        addToast('Pending answers are already claimed — retry with force or wait for the worker.', 'info');
+      } else {
+        addToast('No unscored oral answers found for this candidate.', 'info');
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
+      const [statusRes, evalRes] = await Promise.all([
+        getEvaluationAgentStatus(candidateId),
+        listInterviewEvaluations(candidateId),
+      ]);
+      setAgent6({
+        ...(statusRes.data || {}),
+        report: evalRes.data?.report || statusRes.data?.report,
+      });
+      setEvaluations(evalRes.data?.evaluations || []);
+    } catch (err) {
+      addToast(formatApiError(err, 'Could not queue pending oral evaluations.'), 'error');
+    } finally {
+      setScoringPending(false);
+    }
+  };
+
   const handleGenerateHrReport = async (force = true) => {
     setGeneratingReport(true);
     try {
@@ -1235,36 +1353,38 @@ export default function CandidateAgentsDashboard() {
     }
   };
 
-  if (loading) {
-    return <LoadingSpinner message="Loading agents dashboard..." />;
-  }
-
-  if (error || !candidate) {
+  if ((error && !candidate) || (!candidate && !detailLoading)) {
+    const notFound = /not found/i.test(String(error || ''));
     return (
       <div className="max-w-3xl mx-auto py-16">
         <EmptyState
           icon={AlertCircle}
-          title="Candidate not found"
+          title={notFound ? 'Candidate not found' : 'Could not load candidate'}
           description={error || 'This candidate could not be loaded.'}
           action={
-            <button type="button" onClick={() => navigate('/candidates')} className="btn-primary px-4 py-2 text-sm">
-              Back to candidates
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <button type="button" onClick={() => loadAll({ force: true })} className="btn-primary px-4 py-2 text-sm">
+                Retry
+              </button>
+              <button type="button" onClick={() => navigate('/candidates')} className="btn-secondary px-4 py-2 text-sm">
+                Back to candidates
+              </button>
+            </div>
           }
         />
       </div>
     );
   }
 
-  const hasScreening = Boolean(candidate.evaluationSnapshot) || candidate.matchScore > 0;
+  const hasScreening = Boolean(candidate?.evaluationSnapshot) || Number(candidate?.matchScore || 0) > 0;
   const interviewCompleted =
-    candidate.status === 'Interview Completed'
-    || candidate.backendStatus === 'INTERVIEW_COMPLETED'
-    || Boolean(candidate.interviewCompleted);
+    candidate?.status === 'Interview Completed'
+    || candidate?.backendStatus === 'INTERVIEW_COMPLETED'
+    || Boolean(candidate?.interviewCompleted);
   const hrReport = agent7?.latest?.report || null;
   const headerScore = interviewCompleted && hrReport
     ? Math.round(Number(hrReport.overall_score || 0))
-    : (candidate.matchScore || 0);
+    : (candidate?.matchScore || 0);
   const headerRecommendation = (() => {
     if (interviewCompleted && hrReport) {
       const decision = String(hrReport.decision || '').trim().toUpperCase();
@@ -1275,10 +1395,10 @@ export default function CandidateAgentsDashboard() {
       return hrReport.decision || 'Hold';
     }
     if (interviewCompleted && !hrReport) return null;
-    return candidate.recommendation || null;
+    return candidate?.recommendation || null;
   })();
-  const hasSchedule = Boolean(candidate.scheduledDate || candidate.meetingLink || candidate.interviewScheduled);
-  const agent5Status = agent5CardStatus(agent5, candidate.joinLink, agent5Loading);
+  const hasSchedule = Boolean(candidate?.scheduledDate || candidate?.meetingLink || candidate?.interviewScheduled);
+  const agent5Status = agent5CardStatus(agent5, candidate?.joinLink, agent5Loading);
   const agent5Closed = ['terminated', 'completed'].includes(
     String(agent5?.session_status || agent5?.verification_status || '').toLowerCase(),
   );
@@ -1287,13 +1407,13 @@ export default function CandidateAgentsDashboard() {
   const report = plan?.human_readable_report;
   const difficulty = plan?.difficulty_distribution;
   const pipeline = [
-    { n: 1, label: 'Screening', ready: hasScreening },
-    { n: 2, label: 'Scheduler', ready: hasSchedule },
-    { n: 3, label: 'Planning', ready: Boolean(plan) },
-    { n: 4, label: 'Interview', ready: Boolean(agent4?.questions_ready) },
-    { n: 5, label: 'Proctoring', ready: Boolean(agent5?.agent5_session_id) },
-    { n: 6, label: 'Evaluation', ready: evaluations.length > 0 },
-    { n: 7, label: 'HR report', ready: Boolean(agent7?.latest?.report) },
+    { n: 1, label: 'Screening', ready: hasScreening, loading: detailLoading && !hasScreening },
+    { n: 2, label: 'Scheduler', ready: hasSchedule, loading: detailLoading && !hasSchedule },
+    { n: 3, label: 'Planning', ready: Boolean(plan), loading: blueprintLoading },
+    { n: 4, label: 'Interview', ready: Boolean(agent4?.questions_ready), loading: agent4Loading },
+    { n: 5, label: 'Proctoring', ready: Boolean(agent5?.agent5_session_id), loading: agent5Loading },
+    { n: 6, label: 'Evaluation', ready: evaluations.length > 0, loading: agent6Loading },
+    { n: 7, label: 'HR report', ready: Boolean(agent7?.latest?.report), loading: agent7Loading },
   ];
 
   return (
@@ -1315,18 +1435,46 @@ export default function CandidateAgentsDashboard() {
             <span className="mx-1.5">/</span>
             Agents dashboard
           </p>
-          <h2 className="text-xl font-bold text-col truncate">{candidate.name}</h2>
+          <h2 className="text-xl font-bold text-col truncate">
+            {candidate?.name || candidateId || 'Candidate'}
+          </h2>
         </div>
         <button
           type="button"
-          onClick={loadAll}
+          onClick={() => loadAll({ force: true })}
           className="btn-secondary flex items-center gap-2 px-3 py-2 text-sm"
         >
-          <RefreshCw size={14} />
+          {detailLoading ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
           Refresh
         </button>
       </div>
 
+      {detailLoading && !candidate ? (
+        <div className="card px-4 py-3.5 animate-pulse">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-slate-200 dark:bg-slate-700" />
+            <div className="flex-1 space-y-2">
+              <div className="h-4 w-48 rounded bg-slate-200 dark:bg-slate-700" />
+              <div className="h-3 w-72 rounded bg-slate-200 dark:bg-slate-700" />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {error && candidate ? (
+        <div className="rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/80 dark:bg-amber-900/20 px-3 py-2 flex flex-wrap items-center gap-2">
+          <p className="text-xs text-amber-800 dark:text-amber-200 flex-1">{error}</p>
+          <button
+            type="button"
+            onClick={() => loadAll({ force: true })}
+            className="btn-secondary px-3 py-1.5 text-xs"
+          >
+            Retry detail
+          </button>
+        </div>
+      ) : null}
+
+      {candidate ? (
       <div className="card px-4 py-3.5 shrink-0">
         <div className="flex flex-col lg:flex-row lg:items-center gap-3">
           <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -1340,9 +1488,16 @@ export default function CandidateAgentsDashboard() {
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="font-bold text-col truncate">{candidate.name}</h3>
                 <StatusBadge status={candidate.status} />
+                {detailLoading ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-muted">
+                    <Loader2 size={11} className="animate-spin" />
+                    Updating…
+                  </span>
+                ) : null}
               </div>
               <p className="text-xs text-muted truncate mt-0.5">
-                {candidate.appliedJob}
+                <span className="font-mono">{candidate.candidateId || candidate.id}</span>
+                {candidate.appliedJob ? ` · ${candidate.appliedJob}` : ''}
                 {candidate.experience ? ` · ${candidate.experience}` : ''}
               </p>
               <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-muted">
@@ -1394,6 +1549,7 @@ export default function CandidateAgentsDashboard() {
           </div>
         </div>
       </div>
+      ) : null}
 
       <div className="card px-2 py-2">
         <div className="flex items-center gap-1 overflow-x-auto">
@@ -1415,10 +1571,16 @@ export default function CandidateAgentsDashboard() {
                       ? 'bg-white/20 text-current'
                       : step.ready
                         ? 'bg-emerald-500 text-white'
-                        : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
+                        : step.loading
+                          ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
                   }`}
                 >
-                  {step.n}
+                  {step.loading && !step.ready ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    step.n
+                  )}
                 </span>
                 <span className={`text-xs font-semibold truncate ${activeAgent === step.n ? '' : 'text-col'}`}>
                   {step.label}
@@ -1433,7 +1595,13 @@ export default function CandidateAgentsDashboard() {
       </div>
 
       <section>
-        {activeAgent === 1 && (
+        {!candidate ? (
+          <div className="card p-8 flex items-center justify-center gap-2 text-sm text-muted">
+            <Loader2 size={16} className="animate-spin text-primary-accent" />
+            Loading candidate profile…
+          </div>
+        ) : null}
+        {candidate && activeAgent === 1 && (
         <AgentCard
           agent="Agent 1 · Screening"
           title="Match & evaluation"
@@ -1466,7 +1634,7 @@ export default function CandidateAgentsDashboard() {
         </AgentCard>
         )}
 
-        {activeAgent === 2 && (
+        {candidate && activeAgent === 2 && (
         <AgentCard
           agent="Agent 2 · Scheduler"
           title="Interview scheduling"
@@ -1519,7 +1687,7 @@ export default function CandidateAgentsDashboard() {
         </AgentCard>
         )}
 
-        {activeAgent === 3 && (
+        {candidate && activeAgent === 3 && (
         <AgentCard
           agent="Agent 3 · Planning"
           title="Interview blueprint"
@@ -1752,7 +1920,7 @@ export default function CandidateAgentsDashboard() {
         </AgentCard>
         )}
 
-        {activeAgent === 4 && (
+        {candidate && activeAgent === 4 && (
           <AgentCard
             agent="Agent 4 · Interview"
             title="Live AI interviewer"
@@ -2196,7 +2364,7 @@ export default function CandidateAgentsDashboard() {
           </AgentCard>
         )}
 
-        {activeAgent === 5 && (
+        {candidate && activeAgent === 5 && (
           <AgentCard
             agent="Agent 5 · Fraud Detection"
             title="Live proctoring gate"
@@ -2297,7 +2465,7 @@ export default function CandidateAgentsDashboard() {
           </AgentCard>
         )}
 
-        {activeAgent === 6 && (
+        {candidate && activeAgent === 6 && (
           <AgentCard
             agent="Agent 6 · Evaluation"
             title="Answer evaluation"
@@ -2358,6 +2526,24 @@ export default function CandidateAgentsDashboard() {
                   against the full planned set — unanswered or skipped questions count as 0.
                 </p>
 
+                {Array.isArray(agent6?.report?.items)
+                  && agent6.report.items.some((row) => row.evaluation_pending || row.verdict === 'pending') ? (
+                  <div className="flex flex-wrap items-center gap-2 rounded-xl border border-amber-200 dark:border-amber-900/40 bg-amber-50/80 dark:bg-amber-900/20 px-3 py-2">
+                    <p className="text-xs text-amber-800 dark:text-amber-200 flex-1">
+                      Oral answers are saved but not scored yet (end-of-interview scoring may have been skipped).
+                    </p>
+                    <button
+                      type="button"
+                      disabled={scoringPending}
+                      onClick={() => handleScorePendingOral(true)}
+                      className="btn-secondary flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-60"
+                    >
+                      {scoringPending ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                      {scoringPending ? 'Queuing…' : 'Score pending answers'}
+                    </button>
+                  </div>
+                ) : null}
+
                 {agent6?.report ? (
                   <div className="grid grid-cols-3 gap-2">
                     {[
@@ -2388,12 +2574,14 @@ export default function CandidateAgentsDashboard() {
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[10px] uppercase tracking-wider font-semibold text-muted">
-                            {answerKindLabel(row.kind)} · {answerStatusLabel(row.status)}
+                            {answerKindLabel(row.kind)} · {answerStatusLabel(row.status, row.verdict)}
                           </span>
                           <span className="text-[11px] font-semibold text-col">
                             {row.counts_toward_score === false || row.kind === 'candidate_qna'
                               ? 'Not scored'
-                              : `${Number(row.score || 0).toFixed(0)} / ${Number(row.max_score || 100).toFixed(0)}${row.verdict ? ` · ${row.verdict}` : ''}`}
+                              : row.evaluation_pending || row.verdict === 'pending'
+                                ? 'Pending score'
+                                : `${Number(row.score || 0).toFixed(0)} / ${Number(row.max_score || 100).toFixed(0)}${row.verdict ? ` · ${row.verdict}` : ''}`}
                           </span>
                         </div>
                         <p className="text-sm text-col font-medium whitespace-pre-wrap">{row.question_text || '—'}</p>
@@ -2433,7 +2621,7 @@ export default function CandidateAgentsDashboard() {
           </AgentCard>
         )}
 
-        {activeAgent === 7 && (
+        {candidate && activeAgent === 7 && (
           <AgentCard
             agent="Agent 7 · Recommendation"
             title="Final HR report"
@@ -2503,8 +2691,29 @@ export default function CandidateAgentsDashboard() {
                 {agent7?.latest?.report ? (
                   (() => {
                     const report = agent7.latest.report;
+                    const reportCandidateId = report.candidate_id || agent7.candidate_id || candidate.candidateId || candidate.id;
+                    const interviewStatusLabel = interviewCompleted
+                      ? 'Interview Completed'
+                      : report.candidate_status
+                        || (report.left_early ? 'Left early' : report.incomplete ? 'Incomplete' : report.interview_attempted ? 'In progress' : 'Not started');
                     return (
                       <div className="space-y-3">
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
+                          <span>
+                            <span className="font-semibold text-col">Candidate ID:</span>{' '}
+                            <span className="font-mono">{reportCandidateId}</span>
+                          </span>
+                          <span>
+                            <span className="font-semibold text-col">Status:</span> {interviewStatusLabel}
+                          </span>
+                          <span>
+                            <span className="font-semibold text-col">Answers:</span>{' '}
+                            {Number(report.questions_answered || 0)}/{Number(report.questions_total || 0)}
+                          </span>
+                          <span className="capitalize">
+                            <span className="font-semibold text-col">Stage:</span> {report.stage || '—'}
+                          </span>
+                        </div>
                         <div className="grid grid-cols-3 gap-2">
                           {[
                             { label: 'Overall', value: Number(report.overall_score || 0).toFixed(0) },

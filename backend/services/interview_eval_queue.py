@@ -69,14 +69,29 @@ def _history_from_oral_turns(turns: list[dict[str, Any]] | None) -> list[dict[st
     return history
 
 
+def _turn_already_scored(turn: dict[str, Any]) -> bool:
+    evaluation = turn.get("evaluation")
+    if isinstance(evaluation, dict) and evaluation.get("score") is not None:
+        return True
+    if turn.get("score") is not None and str(turn.get("verdict") or "").strip():
+        # Durable oral rows may carry score/verdict without a nested evaluation blob.
+        try:
+            float(turn.get("score"))
+            return True
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
 def enqueue_deferred_turn_evaluations(
     *,
     candidate_id: str,
     turn_history: list[dict[str, Any]],
     context: dict[str, Any] | None = None,
+    force: bool = False,
 ) -> int:
     """Enqueue Agent 6 jobs for saved turns after the live interview ends."""
-    from services.interview_speed_cache import claim_eval_job
+    from services.interview_speed_cache import claim_eval_job, clear_eval_job_claim
 
     queued = 0
     ctx = dict(context or {})
@@ -85,8 +100,7 @@ def enqueue_deferred_turn_evaluations(
             continue
         if turn.get("hr_skipped") or turn.get("skipped_thin") or turn.get("candidate_qna"):
             continue
-        evaluation = turn.get("evaluation")
-        if isinstance(evaluation, dict) and evaluation:
+        if _turn_already_scored(turn):
             continue
         question = dict(turn.get("question") or {})
         if (
@@ -104,6 +118,8 @@ def enqueue_deferred_turn_evaluations(
             question["id"] = question_id
         if not question.get("question_text"):
             question["question_text"] = str(turn.get("question_text") or "")
+        if force:
+            clear_eval_job_claim(candidate_id, question_id, answer)
         if not claim_eval_job(candidate_id, question_id, answer):
             continue
         enqueue_answer_evaluation(
@@ -133,6 +149,7 @@ def enqueue_deferred_oral_evaluations_for_candidate(
     oral_turns: list[dict[str, Any]] | None = None,
     turn_history: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
+    force: bool = False,
 ) -> int:
     """Queue unscored oral answers for leave / terminate / incomplete interviews.
 
@@ -148,6 +165,7 @@ def enqueue_deferred_oral_evaluations_for_candidate(
         candidate_id=cid,
         turn_history=history,
         context=context,
+        force=force,
     )
 
 

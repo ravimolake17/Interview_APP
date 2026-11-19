@@ -334,6 +334,7 @@ export default function Reports() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-muted">
+                  <th className="pb-2 font-semibold">Candidate ID</th>
                   <th className="pb-2 font-semibold">Candidate</th>
                   <th className="pb-2 font-semibold">Email</th>
                   <th className="pb-2 font-semibold">Job</th>
@@ -343,6 +344,7 @@ export default function Reports() {
               <tbody>
                 {inviteDelivery.candidates.map((row) => (
                   <tr key={row.candidate_id} className="border-t border-col">
+                    <td className="py-2.5 font-mono text-xs text-muted">{row.candidate_id}</td>
                     <td className="py-2.5">
                       <Link
                         to={`/hr-review?candidate=${row.candidate_id}`}
@@ -378,6 +380,7 @@ export default function Reports() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-[11px] uppercase tracking-wider text-muted">
+                  <th className="pb-2 font-semibold">Candidate ID</th>
                   <th className="pb-2 font-semibold">Candidate</th>
                   <th className="pb-2 font-semibold">Role</th>
                   <th className="pb-2 font-semibold">Decision</th>
@@ -388,6 +391,7 @@ export default function Reports() {
               <tbody>
                 {hrReports.slice(0, 12).map((row) => (
                   <tr key={row.report_id} className="border-t border-col">
+                    <td className="py-2.5 font-mono text-xs text-muted">{row.candidate_id}</td>
                     <td className="py-2.5">
                       <Link
                         to={`/candidates/${row.candidate_id}`}

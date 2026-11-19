@@ -33,6 +33,38 @@ async def get_evaluation_agent_status(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/candidates/{candidate_id}/evaluate-pending")
+async def evaluate_pending_oral_answers(
+    candidate_id: str,
+    request: Request,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _tenant: Candidate = Depends(accessible_candidate),
+) -> dict:
+    """Queue Agent 6 scoring for oral answers that were saved but never evaluated."""
+    service = EvaluationAgentService(db)
+    try:
+        result = await service.queue_pending_oral_evaluations(candidate_id, force=force)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    await AuditService(db).log(
+        action="INTERVIEW_PENDING_EVAL_QUEUED",
+        entity_type="candidate",
+        entity_id=candidate_id,
+        user=current_user,
+        request=request,
+        ip_address=get_client_ip(request),
+        details=result,
+        message=(
+            f"Queued {result.get('queued', 0)} pending oral evaluation(s) "
+            f"for {candidate_id} (pending={result.get('pending_answers', 0)})."
+        ),
+    )
+    await db.commit()
+    return result
+
+
 @router.post(
     "/candidates/{candidate_id}/evaluate",
     response_model=EvaluateAnswerResponse,

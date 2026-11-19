@@ -283,6 +283,10 @@ export const getEvaluationAgentStatus = (candidateId) =>
   api.get(`/interview/agent6/candidates/${candidateId}/status`);
 export const evaluateInterviewAnswer = (candidateId, payload) =>
   api.post(`/interview/agent6/candidates/${candidateId}/evaluate`, payload);
+export const evaluatePendingOralAnswers = (candidateId, { force = false } = {}) =>
+  api.post(`/interview/agent6/candidates/${candidateId}/evaluate-pending`, null, {
+    params: { force },
+  });
 export const listInterviewEvaluations = (candidateId) =>
   api.get(`/interview/agent6/candidates/${candidateId}/evaluations`);
 export const getOralAnswerAudio = (candidateId, questionId) =>
@@ -321,8 +325,8 @@ export const controlInterviewRoom = (candidateId, action, message) =>
 
 export const getHRCandidates = (status = 'all') =>
   api.get('/hr/candidates', { params: { status } });
-export const getHRCandidateDetail = (candidateId) =>
-  api.get(`/hr/candidates/${candidateId}`);
+export const getHRCandidateDetail = (candidateId, config = {}) =>
+  api.get(`/hr/candidates/${candidateId}`, { timeout: 60000, ...config });
 export const shortlistCandidate = (candidateId) =>
   api.post(`/hr/candidates/${candidateId}/shortlist`);
 export const rejectCandidate = (candidateId) =>

@@ -152,8 +152,9 @@ function inviteStatusLabel(candidate) {
 
 function buildCandidateRows(candidates) {
   return [
-    ['Name', 'Email', 'Job', 'Match Score (%)', 'Status', 'Invite'],
+    ['Candidate ID', 'Name', 'Email', 'Job', 'Match Score (%)', 'Status', 'Invite'],
     ...candidates.map((c) => [
+      c.candidateId || c.id || '',
       c.name,
       c.email,
       c.appliedJob,
@@ -203,8 +204,9 @@ function collectReportData(stats, candidates) {
     ),
     inviteDelivery: buildTableRows(
       'Interview Invite Emails',
-      ['Name', 'Email', 'Job', 'Invite'],
+      ['Candidate ID', 'Name', 'Email', 'Job', 'Invite'],
       (stats.invite_delivery?.candidates || []).map((row) => [
+        row.candidate_id || '',
         row.full_name,
         row.email,
         row.job_position || '',
@@ -927,7 +929,7 @@ export async function exportReportPdf(stats, candidates, company) {
     { section: data.matchTrend, widths: [0.4, 0.3, 0.3] },
     { section: data.topSkills, widths: [0.72, 0.28] },
     { section: data.hiringFunnel, widths: [0.72, 0.28] },
-    { section: data.inviteDelivery, widths: [0.22, 0.28, 0.28, 0.22] },
+    { section: data.inviteDelivery, widths: [0.18, 0.2, 0.24, 0.22, 0.16] },
   ].forEach(({ section, widths }) => {
     if (section.rows.length) {
       pdf.drawTable(section.title, section.headers, section.rows, widths);
@@ -940,7 +942,7 @@ export async function exportReportPdf(stats, candidates, company) {
       'Candidates',
       data.candidates[0],
       data.candidates.slice(1),
-      [0.16, 0.22, 0.22, 0.1, 0.14, 0.16],
+      [0.16, 0.14, 0.18, 0.16, 0.1, 0.14, 0.12],
     );
   }
 

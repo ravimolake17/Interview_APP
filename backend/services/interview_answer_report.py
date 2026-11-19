@@ -221,6 +221,7 @@ def _oral_item_from_eval(
             "has_audio": bool(audio_path),
             "counts_toward_score": False,
         }
+    model = str(_row_get(row, "model") or payload.get("model") or "").strip()
     if answered and is_non_answer(answer):
         score = 0.0
         verdict = "insufficient"
@@ -230,11 +231,37 @@ def _oral_item_from_eval(
         )
         gaps = ["Candidate did not answer the question."]
         strengths: list[str] = []
+        evaluation_pending = False
     else:
-        verdict = str(_row_get(row, "verdict") or payload.get("verdict") or ("insufficient" if not answered else "adequate"))
-        feedback = str(payload.get("feedback_for_agent4") or payload.get("resume_alignment") or payload.get("feedback") or "")
-        gaps = list(payload.get("gaps") or [])[:4]
-        strengths = list(payload.get("strengths") or [])[:4]
+        has_real_score = (
+            score_raw is not None
+            or payload.get("score") is not None
+            or bool(model)
+            or bool(payload.get("feedback_for_agent4") or payload.get("feedback"))
+        )
+        if answered and not has_real_score:
+            # Transcript saved; Agent 6 has not scored this turn yet.
+            verdict = "pending"
+            feedback = "Answer saved. Waiting for Agent 6 automatic evaluation."
+            gaps = []
+            strengths = []
+            score = 0.0
+            evaluation_pending = True
+        else:
+            verdict = str(
+                _row_get(row, "verdict")
+                or payload.get("verdict")
+                or ("insufficient" if not answered else "adequate")
+            )
+            feedback = str(
+                payload.get("feedback_for_agent4")
+                or payload.get("resume_alignment")
+                or payload.get("feedback")
+                or ""
+            )
+            gaps = list(payload.get("gaps") or [])[:4]
+            strengths = list(payload.get("strengths") or [])[:4]
+            evaluation_pending = False
     return {
         "kind": kind,
         "question_id": question_id,
@@ -245,12 +272,13 @@ def _oral_item_from_eval(
         "max_score": 100.0,
         "verdict": verdict,
         "status": "answered" if answered else status,
-        "model": str(_row_get(row, "model") or payload.get("model") or ""),
+        "model": model,
         "feedback": feedback,
         "gaps": gaps,
         "strengths": strengths,
         "has_audio": bool(audio_path),
         "counts_toward_score": True,
+        "evaluation_pending": evaluation_pending,
     }
 
 

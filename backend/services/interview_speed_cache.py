@@ -275,10 +275,22 @@ def clear_pending_stt_correction(candidate_id: str, question_id: str) -> None:
         cache_delete(_pending_stt_key(candidate_id, question_id))
 
 
-def claim_eval_job(candidate_id: str, question_id: str, answer_text: str) -> bool:
-    """Prevent duplicate Agent 6 jobs for the same turn answer. True = claimed."""
+def _eval_claim_key(candidate_id: str, question_id: str, answer_text: str) -> str:
     digest = hashlib.sha256(
         f"{candidate_id}|{question_id}|{(answer_text or '').strip()}".encode("utf-8")
     ).hexdigest()[:24]
-    key = f"interview:eval:claim:{candidate_id}:{question_id}:{digest}"
-    return cache_set_nx(key, {"claimed": True}, ttl_seconds=TTL)
+    return f"interview:eval:claim:{candidate_id}:{question_id}:{digest}"
+
+
+def claim_eval_job(candidate_id: str, question_id: str, answer_text: str) -> bool:
+    """Prevent duplicate Agent 6 jobs for the same turn answer. True = claimed."""
+    return cache_set_nx(
+        _eval_claim_key(candidate_id, question_id, answer_text),
+        {"claimed": True},
+        ttl_seconds=TTL,
+    )
+
+
+def clear_eval_job_claim(candidate_id: str, question_id: str, answer_text: str) -> None:
+    """Drop a stale claim so unscored answers can be re-queued after a missed end hook."""
+    cache_delete(_eval_claim_key(candidate_id, question_id, answer_text))

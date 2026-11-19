@@ -22,6 +22,9 @@ class SimilarPastCase(BaseModel):
 
 
 class HrRecommendationReport(BaseModel):
+    candidate_id: str = ""
+    full_name: str = ""
+    candidate_status: str = ""
     decision: RecommendationDecision = "HOLD"
     overall_score: float = Field(ge=0, le=100, default=0)
     screening_score: float = Field(ge=0, le=100, default=0)

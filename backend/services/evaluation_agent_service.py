@@ -69,17 +69,73 @@ class EvaluationAgentService:
             job_position=candidate.job_position,
         )
 
+    async def queue_pending_oral_evaluations(
+        self,
+        candidate_id: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Enqueue Agent 6 jobs for oral answers that still lack scores."""
+        candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
+        if not candidate:
+            raise ValueError(f"Candidate not found: {candidate_id}")
+        from services.interview_eval_queue import enqueue_deferred_oral_evaluations_for_candidate
+        from services.interview_oral_store import oral_turns
+
+        turns = oral_turns(candidate)
+        scored_ids = {
+            str(row.question_id or "").strip()
+            for row in await self.eval_repo.list_for_candidate(candidate_id, limit=200)
+            if str(row.question_id or "").strip() and row.score is not None
+        }
+        pending_turns = [
+            turn
+            for turn in turns
+            if str(turn.get("question_id") or "").strip() not in scored_ids
+            and str(turn.get("answer_text") or "").strip()
+            and str(turn.get("answer_text") or "").strip() not in {"[Skipped by HR]", "[No response]"}
+        ]
+        queued = enqueue_deferred_oral_evaluations_for_candidate(
+            candidate_id,
+            oral_turns=pending_turns,
+            context={
+                "job_position": candidate.job_position or "",
+                "jd_text": (candidate.jd_text or "")[:4000],
+                "full_name": candidate.full_name or "",
+            },
+            force=force,
+        )
+        return {
+            "candidate_id": candidate_id,
+            "pending_answers": len(pending_turns),
+            "queued": queued,
+            "force": force,
+        }
+
     async def get_status(self, candidate_id: str) -> dict[str, Any]:
         candidate = await self.candidate_repo.get_by_candidate_id(candidate_id)
         if not candidate:
             raise ValueError(f"Candidate not found: {candidate_id}")
         rows = await self.eval_repo.list_for_candidate(candidate_id, limit=100)
+        # Best-effort: if the live end-hook never ran, queue unscored orals.
+        # Never block the status payload on Redis/claim failures.
+        queued_pending = 0
+        try:
+            result = await self.queue_pending_oral_evaluations(candidate_id, force=False)
+            queued_pending = int(result.get("queued") or 0)
+        except Exception:
+            logger.debug(
+                "Auto-queue of pending oral evaluations skipped for %s",
+                candidate_id,
+                exc_info=True,
+            )
         report = await self._answer_report(candidate_id, candidate)
         return {
             "candidate_id": candidate_id,
             "llama_ready": llama_available(),
             "model": llama_model_id(),
             "evaluations_count": len(rows),
+            "pending_eval_queued": queued_pending,
             "latest": rows[0].evaluation_json if rows else None,
             "report": report,
             "capabilities": {

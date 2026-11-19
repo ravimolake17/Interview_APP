@@ -106,11 +106,20 @@ def gather_evidence(
     questions_total = int(report.get("questions_total") or len(evaluations) or 0)
     questions_answered = int(report.get("questions_answered") or len(scores) or 0)
     stage = "final" if interview_attempted and not incomplete else "preliminary"
+    raw_status = str(getattr(candidate.status, "value", candidate.status) or "").strip().upper()
+    status_labels = {
+        "INTERVIEW_COMPLETED": "Interview Completed",
+        "INTERVIEW_SCHEDULED": "Interview Scheduled",
+        "NEEDS_REVIEW": "Needs Review",
+        "SHORTLISTED": "Shortlisted",
+        "REJECTED": "Rejected",
+        "PENDING": "Pending",
+    }
     return {
         "candidate_id": candidate.candidate_id,
         "full_name": candidate.full_name,
         "role": candidate.job_position or "",
-        "status": str(getattr(candidate.status, "value", candidate.status) or ""),
+        "status": status_labels.get(raw_status, raw_status.replace("_", " ").title() if raw_status else ""),
         "skills": skills,
         "screening_score": round(screening_score, 1),
         "interview_score": interview_score,
@@ -244,6 +253,9 @@ Similar past cases:
     elif evidence.get("incomplete") and decision == "HIRE":
         decision = "CONSIDER"
     return HrRecommendationReport(
+        candidate_id=str(evidence.get("candidate_id") or ""),
+        full_name=str(evidence.get("full_name") or ""),
+        candidate_status=str(evidence.get("status") or ""),
         decision=decision,  # type: ignore[arg-type]
         overall_score=overall,
         screening_score=float(evidence.get("screening_score") or 0),
@@ -312,6 +324,9 @@ def _heuristic_report(
         risks.insert(0, f"Integrity risk score {evidence.get('integrity_risk')}.")
 
     return HrRecommendationReport(
+        candidate_id=str(evidence.get("candidate_id") or ""),
+        full_name=str(evidence.get("full_name") or ""),
+        candidate_status=str(evidence.get("status") or ""),
         decision=decision,  # type: ignore[arg-type]
         overall_score=overall,
         screening_score=float(evidence.get("screening_score") or 0),
