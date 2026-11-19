@@ -324,7 +324,7 @@ export const controlInterviewRoom = (candidateId, action, message) =>
   });
 
 export const getHRCandidates = (status = 'all') =>
-  api.get('/hr/candidates', { params: { status } });
+  api.get('/hr/candidates', { params: { status }, timeout: 45000 });
 export const getHRCandidateDetail = (candidateId, config = {}) =>
   api.get(`/hr/candidates/${candidateId}`, { timeout: 60000, ...config });
 export const shortlistCandidate = (candidateId) =>
@@ -343,7 +343,7 @@ export const getAuditLogs = (limit = 100, companyId) =>
     },
   });
 
-export const getDashboardStats = () => api.get('/hr/dashboard/stats');
+export const getDashboardStats = () => api.get('/hr/dashboard/stats', { timeout: 45000 });
 
 export const getJobs = () => api.get('/jobs');
 export const checkJobDuplicate = ({ title, jdFileUrl } = {}) =>
@@ -372,7 +372,7 @@ export const getManagedDepartments = (params = {}) => api.get('/departments/mana
 export const createDepartment = (payload) => api.post('/departments', payload);
 export const updateDepartment = (departmentId, payload) =>
   api.patch(`/departments/${departmentId}`, payload);
-export const getSuperAdminSystem = () => api.get('/superadmin/system');
+export const getSuperAdminSystem = () => api.get('/superadmin/system', { timeout: 60000 });
 export const updateSuperAdminCompany = (payload) => api.patch('/superadmin/company', payload);
 export const updateScreeningPolicy = (payload) => api.patch('/superadmin/screening-policy', payload);
 export const getDatabaseTables = () => api.get('/superadmin/database/tables');

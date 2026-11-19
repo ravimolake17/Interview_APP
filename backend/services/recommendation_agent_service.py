@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agents.recommendation_agent.graph import RecommendationLangGraphAgent
 from agents.recommendation_agent.report_builder import gather_evidence
 from agents.recommendation_agent.schemas import HrRecommendationReport, HrRecommendationResponse
-from agents.shared.llama_client import llama_available, llama_model_id
+from agents.shared.llama_client import llama_available, llama_model_id, llama_ready_hint
 from core.chroma_runtime import chroma_status
 from core.chroma_store import index_hr_outcome
 from repositories.candidate_repository import CandidateRepository
@@ -111,6 +111,7 @@ class RecommendationAgentService:
         return {
             "candidate_id": candidate_id,
             "llama_ready": llama_available(),
+            "llama_ready_hint": llama_ready_hint(),
             "model": llama_model_id(),
             "report_ready": row is not None,
             "latest": self._to_response(candidate, row).model_dump(mode="json") if row else None,

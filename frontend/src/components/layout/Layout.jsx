@@ -4,21 +4,14 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import ToastContainer from '../ui/ToastContainer';
-import LoadingSpinner from '../LoadingSpinner';
 import ScreeningQueuePanel from '../screening/ScreeningQueuePanel';
 import { useApp } from '../../context/AppContext';
 
 export default function Layout() {
-  const { sidebarCollapsed, refreshData, workingCompanyId, workingCompany, loadingData } = useApp();
+  const { sidebarCollapsed, workingCompanyId } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
-  const refreshDataRef = useRef(refreshData);
   const previousCompanyRef = useRef(workingCompanyId);
-  refreshDataRef.current = refreshData;
-
-  useEffect(() => {
-    refreshDataRef.current({ silent: true });
-  }, [location.pathname]);
 
   useEffect(() => {
     const previous = previousCompanyRef.current;
@@ -51,11 +44,7 @@ export default function Layout() {
             transition={{ duration: 0.2 }}
             className="flex-1 p-6"
           >
-            {loadingData ? (
-              <LoadingSpinner message={`Loading ${workingCompany?.name || 'company'}...`} />
-            ) : (
-              <Outlet />
-            )}
+            <Outlet />
           </motion.main>
         </AnimatePresence>
       </div>

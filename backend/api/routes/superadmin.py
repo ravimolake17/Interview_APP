@@ -65,10 +65,25 @@ async def get_system_overview(
     table_stats: list[DatabaseTableStat] = []
     try:
         await db.execute(text("SELECT 1"))
+        # Approximate counts via catalog estimates — instant vs full COUNT(*) scans.
         for label, table_name in _OVERVIEW_TABLES:
             try:
-                count = await db.scalar(text(f'SELECT COUNT(*) FROM "{table_name}"'))
-                table_stats.append(DatabaseTableStat(name=label, rows=int(count or 0)))
+                estimate = await db.scalar(
+                    text(
+                        """
+                        SELECT COALESCE(c.reltuples, 0)::bigint
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE c.relname = :table_name
+                          AND n.nspname = 'public'
+                        LIMIT 1
+                        """
+                    ),
+                    {"table_name": table_name},
+                )
+                if estimate is None:
+                    estimate = await db.scalar(text(f'SELECT COUNT(*) FROM "{table_name}"'))
+                table_stats.append(DatabaseTableStat(name=label, rows=max(0, int(estimate or 0))))
             except Exception:
                 table_stats.append(DatabaseTableStat(name=label, rows=0))
     except Exception:
@@ -81,6 +96,13 @@ async def get_system_overview(
     queue = await ScreeningJobRepository(db).count_by_status()
     service = ApplicationSettingsService(db)
     company_id = scope.filter_company_id
+    # Same AsyncSession cannot run concurrent awaits — keep these sequential.
+    integration = await service.get_integration_status()
+    ai_model = await service.get_ai_model()
+    company = await service.get_company(company_id)
+    screening_policy = await service.get_screening_policy(company_id)
+    smtp_accounts = await service.list_smtp_accounts()
+    availability = await service.get_interview_availability(company_id)
     return SuperAdminSystemResponse(
         database=DatabaseOverview(
             engine="PostgreSQL",
@@ -90,11 +112,11 @@ async def get_system_overview(
             tables=table_stats,
             message=message,
         ),
-        integration=await service.get_integration_status(),
-        ai_model=await service.get_ai_model(),
-        company=await service.get_company(company_id),
-        screening_policy=await service.get_screening_policy(company_id),
-        smtp_accounts=await service.list_smtp_accounts(),
+        integration=integration,
+        ai_model=ai_model,
+        company=company,
+        screening_policy=screening_policy,
+        smtp_accounts=smtp_accounts,
         platform=PlatformRuntime(
             frontend_url=settings.frontend_url,
             access_token_minutes=settings.jwt_access_token_expire_minutes,
@@ -102,7 +124,7 @@ async def get_system_overview(
             smtp_host=settings.smtp_host or "not configured",
             smtp_from=settings.smtp_from_email,
             smtp_configured=bool(settings.smtp_host and settings.smtp_user),
-            interview_duration_minutes=(await service.get_interview_availability(company_id)).slot_minutes,
+            interview_duration_minutes=availability.slot_minutes,
             token_expiry_hours=settings.token_expiry_hours,
         ),
         users={

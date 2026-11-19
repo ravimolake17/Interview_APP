@@ -51,7 +51,6 @@ from services.screening_integration_service import (
     promote_to_shortlisted_and_schedule,
     reject_candidate,
     resend_shortlisted_invite,
-    restore_booked_candidates_to_scheduled,
     set_candidate_contact_email,
 )
 
@@ -190,18 +189,35 @@ async def _build_summary(
     db: AsyncSession,
     *,
     interview_result: str | None = None,
+    interview: object | None = None,
+    invite_sent: bool | None = None,
+    invite_used: bool | None = None,
+    detect_finished: bool = True,
+    persist_status: bool = True,
 ) -> HRCandidateSummary:
-    interview_repo = InterviewRepository(db)
-    token_repo = TokenRepository(db)
-    interview = await interview_repo.get_by_candidate_id(candidate.candidate_id)
-    # Fast paths first — avoid the expensive finish-detection query on every open.
+    """Build an HR list/detail row.
+
+    List endpoints should pass preloaded interview/token flags and
+    detect_finished=False / persist_status=False to avoid N+1 work.
+    """
+    if interview is None:
+        interview = await InterviewRepository(db).get_by_candidate_id(candidate.candidate_id)
+    if invite_sent is None or invite_used is None:
+        token_repo = TokenRepository(db)
+        if invite_used is None:
+            invite_used = await token_repo.has_used_token(candidate.candidate_id)
+        if invite_sent is None:
+            invite_sent = await token_repo.has_any_token(candidate.candidate_id)
+
+    # Fast paths first — avoid the expensive finish-detection query on list views.
     interview_completed = bool(
         candidate.status == CandidateStatus.INTERVIEW_COMPLETED
         or (interview and interview.status == InterviewStatus.COMPLETED)
         or snapshot_shows_completed(candidate.evaluation_snapshot)
     )
     if (
-        not interview_completed
+        detect_finished
+        and not interview_completed
         and candidate.status == CandidateStatus.INTERVIEW_SCHEDULED
     ):
         interview_completed = await has_finished_interview(db, candidate)
@@ -210,21 +226,20 @@ async def _build_summary(
         and interview.status == InterviewStatus.SCHEDULED
         and not interview_completed
     )
-    invite_used = await token_repo.has_used_token(candidate.candidate_id)
-    invite_sent = await token_repo.has_any_token(candidate.candidate_id)
-    booked = interview_scheduled or invite_used
-    if interview_completed and candidate.status not in {
-        CandidateStatus.INTERVIEW_COMPLETED,
-        CandidateStatus.REJECTED,
-    }:
-        candidate.status = CandidateStatus.INTERVIEW_COMPLETED
-        await db.flush()
-    elif booked and candidate.status in {
-        CandidateStatus.SHORTLISTED,
-        CandidateStatus.NEEDS_REVIEW,
-    }:
-        candidate.status = CandidateStatus.INTERVIEW_SCHEDULED
-        await db.flush()
+    booked = interview_scheduled or bool(invite_used)
+    if persist_status:
+        if interview_completed and candidate.status not in {
+            CandidateStatus.INTERVIEW_COMPLETED,
+            CandidateStatus.REJECTED,
+        }:
+            candidate.status = CandidateStatus.INTERVIEW_COMPLETED
+            await db.flush()
+        elif booked and candidate.status in {
+            CandidateStatus.SHORTLISTED,
+            CandidateStatus.NEEDS_REVIEW,
+        }:
+            candidate.status = CandidateStatus.INTERVIEW_SCHEDULED
+            await db.flush()
     can_resend = (
         candidate.status == CandidateStatus.SHORTLISTED
         and not interview_scheduled
@@ -253,8 +268,8 @@ async def _build_summary(
         jd_file_url=candidate.jd_file_url,
         interview_scheduled=interview_scheduled,
         interview_completed=interview_completed,
-        invite_used=invite_used,
-        invite_sent=invite_sent,
+        invite_used=bool(invite_used),
+        invite_sent=bool(invite_sent),
         can_resend_invite=can_resend,
         email_missing=email_missing,
         can_edit_email=can_edit_email,
@@ -282,19 +297,29 @@ async def list_candidates(
             detail=f"Invalid status filter. Use one of: {', '.join(STATUS_FILTERS)}",
         )
 
-    await restore_booked_candidates_to_scheduled(db, company_id=scope.filter_company_id)
-    await sync_completed_interviews(db, company_id=scope.filter_company_id)
+    # Cheap status backfill only — never run deep Agent5/eval scans on list GET.
+    await sync_completed_interviews(
+        db, company_id=scope.filter_company_id, deep=False
+    )
 
     repo = CandidateRepository(db)
     candidates = await repo.list_by_status(
         STATUS_FILTERS[normalized], company_id=scope.filter_company_id
     )
-    decisions = await HrRecommendationRepository(db).latest_decisions(
-        [c.candidate_id for c in candidates]
-    )
+    candidate_ids = [c.candidate_id for c in candidates]
+    decisions = await HrRecommendationRepository(db).latest_decisions(candidate_ids)
+    interviews = await InterviewRepository(db).map_by_candidate_ids(candidate_ids)
+    invite_flags = await TokenRepository(db).invite_flags_for_candidates(candidate_ids)
     summaries = [
         await _build_summary(
-            c, db, interview_result=decisions.get(c.candidate_id)
+            c,
+            db,
+            interview_result=decisions.get(c.candidate_id),
+            interview=interviews.get(c.candidate_id),
+            invite_sent=invite_flags.get(c.candidate_id, (False, False))[0],
+            invite_used=invite_flags.get(c.candidate_id, (False, False))[1],
+            detect_finished=False,
+            persist_status=False,
         )
         for c in candidates
     ]
@@ -620,8 +645,7 @@ async def get_dashboard_stats(
     scope: TenantScope = Depends(get_tenant_scope),
 ) -> DashboardStatsResponse:
     """Aggregate recruitment metrics from candidates and saved job postings."""
-    await restore_booked_candidates_to_scheduled(db, company_id=scope.filter_company_id)
-    await sync_completed_interviews(db, company_id=scope.filter_company_id)
+    # Trust persisted statuses on the hot path — do not sync/restore on every poll.
     repo = CandidateRepository(db)
     candidates = await repo.list_by_status(None, company_id=scope.filter_company_id)
 
@@ -716,7 +740,6 @@ async def get_dashboard_stats(
     ]
 
     total = len(candidates)
-    # status_counts already built above; sync_completed_interviews() ran at start.
     shortlisted = status_counts.get(CandidateStatus.SHORTLISTED.value, 0)
     interview_scheduled = status_counts.get(CandidateStatus.INTERVIEW_SCHEDULED.value, 0)
     interview_completed = status_counts.get(CandidateStatus.INTERVIEW_COMPLETED.value, 0)
@@ -754,16 +777,18 @@ async def get_dashboard_stats(
             not_issued += 1
         if candidate.status == CandidateStatus.SHORTLISTED:
             awaiting_booking += 1
-            invite_rows.append(
-                InviteDeliveryCandidate(
-                    candidate_id=candidate.candidate_id,
-                    full_name=candidate.full_name,
-                    email=candidate.email,
-                    job_position=candidate.job_position,
-                    invite_sent=has_token,
-                    can_resend=True,
+            # Cap payload size — dashboard only needs a preview of awaiting invites.
+            if len(invite_rows) < 50:
+                invite_rows.append(
+                    InviteDeliveryCandidate(
+                        candidate_id=candidate.candidate_id,
+                        full_name=candidate.full_name,
+                        email=candidate.email,
+                        job_position=candidate.job_position,
+                        invite_sent=has_token,
+                        can_resend=True,
+                    )
                 )
-            )
 
     invite_delivery = InviteDeliveryStats(
         issued=issued,

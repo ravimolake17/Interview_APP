@@ -143,54 +143,81 @@ export default function SuperAdmin() {
   const loadAll = useCallback(async () => {
     setError(null);
     try {
-      const [systemRes, usersRes, deptRes, companiesRes] = await Promise.all([
+      const [systemRes, usersRes, deptRes, companiesRes] = await Promise.allSettled([
         getSuperAdminSystem(),
         getUsers(),
         getManagedDepartments({ include_all: true }),
         getCompanies(),
       ]);
-      setSystem(systemRes.data);
-      setUsers(usersRes.data.users || []);
-      setDepartments(deptRes.data.departments || []);
-      setCompanies(companiesRes.data.companies || []);
-      const integration = systemRes.data?.integration;
-      if (integration) {
-        setIntegrationForm({
-          groq_api_key: '',
-          azure_openai_api_key: '',
-          azure_speech_key: '',
-          frontend_url: integration.frontend_url || '',
-          agent5_public_url: integration.agent5_public_url || '',
-        });
+
+      const failures = [];
+      if (systemRes.status === 'fulfilled') {
+        setSystem(systemRes.value.data);
+        const integration = systemRes.value.data?.integration;
+        if (integration) {
+          setIntegrationForm({
+            groq_api_key: '',
+            azure_openai_api_key: '',
+            azure_speech_key: '',
+            frontend_url: integration.frontend_url || '',
+            agent5_public_url: integration.agent5_public_url || '',
+          });
+        }
+        const smtpAccounts = systemRes.value.data?.smtp_accounts || [];
+        setSmtpForms(
+          Object.fromEntries(
+            smtpAccounts.map((account) => [
+              account.company_id,
+              {
+                company_id: account.company_id,
+                company_name: account.company_name,
+                company_code: account.company_code,
+                host: account.host || '',
+                port: account.port || 587,
+                username: account.username || '',
+                password: '',
+                from_email: account.from_email || '',
+                from_name: account.from_name || '',
+                use_tls: Boolean(account.use_tls),
+                use_ssl: Boolean(account.use_ssl),
+                timeout_seconds: account.timeout_seconds || 30,
+                password_masked: account.password_masked,
+                using_env_fallback: account.using_env_fallback,
+              },
+            ]),
+          ),
+        );
+        const company = systemRes.value.data?.company;
+        if (company) setCompanyForm(company);
+        const policy = systemRes.value.data?.screening_policy;
+        if (policy) setScreeningForm(policy);
+      } else {
+        failures.push('system');
       }
-      const smtpAccounts = systemRes.data?.smtp_accounts || [];
-      setSmtpForms(
-        Object.fromEntries(
-          smtpAccounts.map((account) => [
-            account.company_id,
-            {
-              company_id: account.company_id,
-              company_name: account.company_name,
-              company_code: account.company_code,
-              host: account.host || '',
-              port: account.port || 587,
-              username: account.username || '',
-              password: '',
-              from_email: account.from_email || '',
-              from_name: account.from_name || '',
-              use_tls: Boolean(account.use_tls),
-              use_ssl: Boolean(account.use_ssl),
-              timeout_seconds: account.timeout_seconds || 30,
-              password_masked: account.password_masked,
-              using_env_fallback: account.using_env_fallback,
-            },
-          ]),
-        ),
-      );
-      const company = systemRes.data?.company;
-      if (company) setCompanyForm(company);
-      const policy = systemRes.data?.screening_policy;
-      if (policy) setScreeningForm(policy);
+
+      if (usersRes.status === 'fulfilled') {
+        setUsers(usersRes.value.data.users || []);
+      } else {
+        failures.push('users');
+      }
+
+      if (deptRes.status === 'fulfilled') {
+        setDepartments(deptRes.value.data.departments || []);
+      } else {
+        failures.push('departments');
+      }
+
+      if (companiesRes.status === 'fulfilled') {
+        setCompanies(companiesRes.value.data.companies || []);
+      } else {
+        failures.push('companies');
+      }
+
+      if (failures.length === 4) {
+        setError('Failed to load SuperAdmin data.');
+      } else if (failures.length) {
+        setError(`Some SuperAdmin panels failed to load (${failures.join(', ')}).`);
+      }
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to load SuperAdmin data.');
     } finally {

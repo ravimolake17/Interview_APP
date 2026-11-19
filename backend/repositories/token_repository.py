@@ -54,6 +54,25 @@ class TokenRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def invite_flags_for_candidates(
+        self, candidate_ids: list[str]
+    ) -> dict[str, tuple[bool, bool]]:
+        """Return {candidate_id: (invite_sent, invite_used)} in one query."""
+        if not candidate_ids:
+            return {}
+        result = await self.db.execute(
+            select(ScheduleToken.candidate_id, ScheduleToken.used).where(
+                ScheduleToken.candidate_id.in_(candidate_ids)
+            )
+        )
+        flags: dict[str, tuple[bool, bool]] = {
+            cid: (False, False) for cid in candidate_ids
+        }
+        for candidate_id, used in result.all():
+            sent, already_used = flags.get(candidate_id, (False, False))
+            flags[candidate_id] = (True, already_used or bool(used))
+        return flags
+
     async def expire_unused_tokens(self, candidate_id: str) -> int:
         """Expire all unused tokens when a new invite link is issued."""
         now = trusted_utc_now()

@@ -341,6 +341,8 @@ export function AppProvider({ children }) {
     }
 
     if (isSuperAdmin(user?.role) && !workingCompanyId) {
+      // SuperAdmin shell can render without a company; do not leave loading stuck.
+      setLoadingData(false);
       return;
     }
 
@@ -348,48 +350,78 @@ export function AppProvider({ children }) {
       silent
       && !force
       && hasLoadedRef.current
-      && now - lastRefreshAtRef.current < 2500
+      && now - lastRefreshAtRef.current < 8000
     ) {
       return;
     }
 
     lastRefreshAtRef.current = now;
     const generation = ++refreshGenerationRef.current;
-    const showSpinner = !silent || !hasLoadedRef.current;
-    if (showSpinner) {
-      setLoadingData(true);
+    // Never block the whole app shell — pages render immediately; data fills in.
+    if (!silent) {
       setDataError(null);
     }
+    setLoadingData(true);
 
     try {
-      const requests = [
+      const settled = await Promise.allSettled([
         getHRCandidates('all'),
         getDashboardStats(),
         getJobs(),
         getDepartments(),
-      ];
-      if (isSuperAdmin(user?.role)) {
-        // Scope audit (and thus notifications) to the active company.
-        requests.push(getAuditLogs(100, workingCompanyId || undefined));
-      }
-
-      const results = await Promise.all(requests);
+        isSuperAdmin(user?.role)
+          ? getAuditLogs(50, workingCompanyId || undefined)
+          : Promise.resolve(null),
+      ]);
       if (generation !== refreshGenerationRef.current) return;
 
-      const candidatesRes = results[0];
-      const statsRes = results[1];
-      const jobsRes = results[2];
-      const departmentsRes = results[3];
-      const auditRes = isSuperAdmin(user?.role) ? results[4] : null;
+      const [candidatesRes, statsRes, jobsRes, departmentsRes, auditRes] = settled;
+      const failures = [];
 
-      const rawCandidates = candidatesRes.data.candidates || [];
-      setCandidates(rawCandidates.map((candidate) => mapCandidateFromBackend(candidate)));
-      setJobs((jobsRes.data.jobs || []).map(mapJobFromBackend));
-      setDepartments((departmentsRes.data.departments || []).map((item) => item.name));
-      setStats(statsRes.data || EMPTY_STATS);
-      setActivity(auditRes ? (auditRes.data.entries || []).map(mapAuditToActivity) : []);
-      setAuditEntries(auditRes ? auditRes.data.entries || [] : []);
+      if (candidatesRes.status === 'fulfilled') {
+        const rawCandidates = candidatesRes.value?.data?.candidates || [];
+        setCandidates(rawCandidates.map((candidate) => mapCandidateFromBackend(candidate)));
+      } else {
+        failures.push('candidates');
+      }
+
+      if (statsRes.status === 'fulfilled') {
+        setStats(statsRes.value?.data || EMPTY_STATS);
+      } else {
+        failures.push('stats');
+      }
+
+      if (jobsRes.status === 'fulfilled') {
+        setJobs((jobsRes.value?.data?.jobs || []).map(mapJobFromBackend));
+      } else {
+        failures.push('jobs');
+      }
+
+      if (departmentsRes.status === 'fulfilled') {
+        setDepartments((departmentsRes.value?.data?.departments || []).map((item) => item.name));
+      } else {
+        failures.push('departments');
+      }
+
+      if (auditRes.status === 'fulfilled' && auditRes.value) {
+        const entries = auditRes.value.data?.entries || [];
+        setActivity(entries.map(mapAuditToActivity));
+        setAuditEntries(entries);
+      } else if (isSuperAdmin(user?.role) && auditRes.status === 'rejected') {
+        failures.push('audit');
+      }
+
       hasLoadedRef.current = true;
+      const coreFailed = ['candidates', 'stats', 'jobs', 'departments'].every((key) =>
+        failures.includes(key),
+      );
+      if (coreFailed) {
+        const message = 'Failed to load dashboard data.';
+        setDataError(message);
+        if (!silent) addToast(message, 'error');
+      } else {
+        setDataError(null);
+      }
     } catch (error) {
       if (generation !== refreshGenerationRef.current) return;
       const message = formatApiError(error, 'Failed to load dashboard data.');
@@ -398,7 +430,7 @@ export function AppProvider({ children }) {
         addToast(message, 'error');
       }
     } finally {
-      if (generation === refreshGenerationRef.current && showSpinner) {
+      if (generation === refreshGenerationRef.current) {
         setLoadingData(false);
       }
     }
@@ -428,7 +460,7 @@ export function AppProvider({ children }) {
 
   useAutoRefresh(
     () => refreshData({ silent: true }),
-    { enabled: isAuthenticated, intervalMs: 15000 },
+    { enabled: isAuthenticated, intervalMs: 60000 },
   );
 
   const addJob = useCallback(async (job) => {

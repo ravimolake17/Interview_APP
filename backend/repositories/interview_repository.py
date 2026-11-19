@@ -21,6 +21,23 @@ class InterviewRepository:
         )
         return result.scalars().first()
 
+    async def map_by_candidate_ids(
+        self, candidate_ids: list[str]
+    ) -> dict[str, Interview]:
+        """Latest interview per candidate_id (one query)."""
+        if not candidate_ids:
+            return {}
+        result = await self.db.execute(
+            select(Interview)
+            .where(Interview.candidate_id.in_(candidate_ids))
+            .order_by(Interview.created_at.desc())
+        )
+        latest: dict[str, Interview] = {}
+        for interview in result.scalars().all():
+            if interview.candidate_id not in latest:
+                latest[interview.candidate_id] = interview
+        return latest
+
     async def list_scheduled_for_week(
         self, week_start: date, week_end: date, *, company_id: int | None = None
     ) -> list[tuple[Interview, Candidate]]:

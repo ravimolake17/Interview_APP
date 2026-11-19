@@ -140,19 +140,31 @@ async def mark_interview_completed(db: AsyncSession, candidate_id: str) -> bool:
 
 
 async def sync_completed_interviews(
-    db: AsyncSession, *, company_id: int | None = None
+    db: AsyncSession,
+    *,
+    company_id: int | None = None,
+    deep: bool = False,
 ) -> int:
-    """Backfill candidates who finished but were left as Interview Scheduled."""
+    """Backfill candidates who finished but were left as Interview Scheduled.
+
+    Default is a cheap pass (interview COMPLETED / snapshot only). Set deep=True
+    only from write paths or admin jobs — deep scans Agent5/eval tables per row.
+    """
     updated = 0
 
     interview_query = select(Interview).where(Interview.status == InterviewStatus.COMPLETED)
     if company_id is not None:
         interview_query = interview_query.where(Interview.company_id == company_id)
     completed_interviews = list((await db.execute(interview_query)).scalars().all())
+    candidate_ids = [interview.candidate_id for interview in completed_interviews]
+    candidates_by_id: dict[str, Candidate] = {}
+    if candidate_ids:
+        rows = (
+            await db.execute(select(Candidate).where(Candidate.candidate_id.in_(candidate_ids)))
+        ).scalars().all()
+        candidates_by_id = {row.candidate_id: row for row in rows}
     for interview in completed_interviews:
-        candidate = await db.scalar(
-            select(Candidate).where(Candidate.candidate_id == interview.candidate_id)
-        )
+        candidate = candidates_by_id.get(interview.candidate_id)
         if candidate is None:
             continue
         if candidate.status in {CandidateStatus.INTERVIEW_COMPLETED, CandidateStatus.REJECTED}:
@@ -166,6 +178,12 @@ async def sync_completed_interviews(
     if company_id is not None:
         scheduled_query = scheduled_query.where(Candidate.company_id == company_id)
     for candidate in (await db.execute(scheduled_query)).scalars().all():
+        if snapshot_shows_completed(candidate.evaluation_snapshot):
+            await mark_interview_completed(db, candidate.candidate_id)
+            updated += 1
+            continue
+        if not deep:
+            continue
         if not await has_finished_interview(db, candidate):
             continue
         await mark_interview_completed(db, candidate.candidate_id)

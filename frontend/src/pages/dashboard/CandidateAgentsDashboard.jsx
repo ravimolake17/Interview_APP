@@ -2473,16 +2473,22 @@ export default function CandidateAgentsDashboard() {
             status={
               agent6Loading
                 ? 'Loading'
-                : agent6?.report?.questions_total
-                  ? `${agent6.report.questions_answered || 0}/${agent6.report.questions_total}`
-                  : agent6?.llama_ready
-                    ? evaluations.length
-                      ? 'Evaluating'
-                      : 'Ready'
-                    : 'Needs GROQ key'
+                : !agent6
+                  ? 'Unavailable'
+                  : agent6?.report?.questions_total
+                    ? `${agent6.report.questions_answered || 0}/${agent6.report.questions_total}`
+                    : agent6?.llama_ready
+                      ? evaluations.length
+                        ? 'Evaluating'
+                        : 'Ready'
+                      : (agent6?.llama_ready_hint || 'Needs Azure/Groq chat key')
             }
             statusTone={
-              agent6?.llama_ready ? (evaluations.length ? 'ready' : 'pending') : 'missing'
+              !agent6
+                ? 'missing'
+                : agent6?.llama_ready
+                  ? (evaluations.length ? 'ready' : 'pending')
+                  : 'missing'
             }
           >
             {agent6Loading ? (
@@ -2611,6 +2617,11 @@ export default function CandidateAgentsDashboard() {
                   <div className="rounded-xl border border-dashed border-col px-4 py-5 text-center">
                     <Gauge size={18} className="mx-auto text-muted mb-2" />
                     <p className="text-sm text-col font-medium">No evaluations yet</p>
+                    <p className="text-xs text-muted mt-1 max-w-md mx-auto">
+                      Oral answers are scored after the interview ends (deferred Agent 6 queue).
+                      If the session expired mid-call, click “Score pending answers” above, and
+                      confirm Azure OpenAI (or Groq) is saved under SuperAdmin → API & Integration.
+                    </p>
                     <p className="text-xs text-muted mt-1">
                       MCQ and oral questions appear here as the candidate answers, or as unanswered if they quit mid-interview.
                     </p>

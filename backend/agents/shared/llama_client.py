@@ -52,18 +52,22 @@ _warned_models: set[str] = set()
 
 
 def _azure_ready(entry: AICatalogEntry | None = None) -> bool:
+    catalog = get_runtime_catalog()
     endpoint = str(
         (entry.endpoint if entry and entry.endpoint else None)
+        or getattr(catalog, "azure_openai_endpoint", "")
         or getattr(settings, "AZURE_OPENAI_ENDPOINT", "")
         or ""
     ).strip()
     deployment = str(
         (entry.model_id if entry else None)
+        or getattr(catalog, "azure_openai_deployment", "")
         or getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")
         or settings.GROQ_MODEL
         or ""
     ).strip()
-    return bool(getattr(settings, "AZURE_OPENAI_API_KEY", None) and endpoint and deployment)
+    api_key = getattr(settings, "AZURE_OPENAI_API_KEY", None)
+    return bool(api_key and endpoint and deployment)
 
 
 def _groq_ready() -> bool:
@@ -71,16 +75,37 @@ def _groq_ready() -> bool:
 
 
 def llama_available() -> bool:
+    """True when any configured chat target (Azure or Groq) can be called."""
     targets = ordered_targets("chat")
     if targets:
-        return any(
+        if any(
             (_azure_ready(entry) if entry.provider == "azure" else _groq_ready())
             for entry in targets
-        )
+        ):
+            return True
+        # Catalog may list Azure as primary while the key is missing — still
+        # allow env Groq so Agent 6/7 are not stuck on a misleading "Needs GROQ".
+        return _groq_ready()
     provider = str(getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
     if provider == "azure":
-        return _azure_ready()
+        return _azure_ready() or _groq_ready()
     return _groq_ready()
+
+
+def llama_ready_hint() -> str:
+    """Short UI hint when chat LLM is not ready."""
+    if llama_available():
+        return ""
+    targets = ordered_targets("chat")
+    primary = targets[0] if targets else None
+    provider = (
+        primary.provider
+        if primary is not None
+        else str(getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
+    )
+    if provider == "azure":
+        return "Needs Azure OpenAI key/endpoint/deployment"
+    return "Needs Groq or Azure chat key"
 
 
 def resolve_groq_model(model_id: str | None) -> str:

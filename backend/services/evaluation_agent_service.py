@@ -15,7 +15,7 @@ from agents.evaluation_agent.evaluator import (
 )
 from agents.evaluation_agent.graph import EvaluationLangGraphAgent
 from agents.evaluation_agent.schemas import EvaluationResult, EvaluateAnswerResponse
-from agents.shared.llama_client import llama_available, llama_model_id
+from agents.shared.llama_client import llama_available, llama_model_id, llama_ready_hint
 from core.chroma_runtime import chroma_status
 from core.chroma_store import index_evaluation_example
 from repositories.candidate_repository import CandidateRepository
@@ -130,16 +130,18 @@ class EvaluationAgentService:
                 exc_info=True,
             )
         report = await self._answer_report(candidate_id, candidate)
+        ready = llama_available()
         return {
             "candidate_id": candidate_id,
-            "llama_ready": llama_available(),
+            "llama_ready": ready,
+            "llama_ready_hint": llama_ready_hint(),
             "model": llama_model_id(),
             "evaluations_count": len(rows),
             "pending_eval_queued": queued_pending,
             "latest": rows[0].evaluation_json if rows else None,
             "report": report,
             "capabilities": {
-                "meta_llama": llama_available(),
+                "meta_llama": ready,
                 "resume_jd_context": True,
                 "web_research": True,
                 "langgraph": True,
