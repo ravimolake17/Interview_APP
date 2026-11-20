@@ -422,7 +422,14 @@ def build_interview_answer_report(
         or int(runtime.get("room_join_count") or 0) > 0
     )
     incomplete = bool(unanswered) or left_early or runtime_state in {"ENDED", "AI_INTERVIEW_ACTIVE", "HR_INTERVENTION"}
-    if runtime_state == "COMPLETED" and not unanswered:
+    candidate_status = str(getattr(getattr(candidate, "status", None), "value", getattr(candidate, "status", "")) or "")
+    every_question_answered = total > 0 and not unanswered
+    # A stale runtime (session expired / hung up after the last answer) must not
+    # mark a fully answered interview as incomplete.
+    if every_question_answered or (
+        not unanswered
+        and (runtime_state == "COMPLETED" or candidate_status == "INTERVIEW_COMPLETED")
+    ):
         incomplete = False
         left_early = False
 
