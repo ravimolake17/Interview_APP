@@ -37,7 +37,7 @@ def _azure_voice(voice: str | None, entry=None, language: str | None = None) -> 
 def synthesize_azure_mp3_stream(
     text: str,
     *,
-    voice: str | None = "female",
+    voice: str | None = None,
     language: str | None = None,
 ) -> Iterator[bytes]:
     """Yield MP3 chunks as Azure produces them (or as soon as the stream is readable)."""
@@ -48,7 +48,7 @@ def synthesize_azure_mp3_stream(
     from agents.screening_agent.config import settings
     from agents.shared.azure_concurrency import azure_slot
     from agents.shared.latency_trace import record_ms, record_unavailable, record_value
-    from agents.shared.model_catalog import ordered_targets
+    from agents.shared.model_catalog import ordered_targets, voice_for_entry
 
     cleaned = _humanize_script(text)
     if not cleaned:
@@ -68,6 +68,8 @@ def synthesize_azure_mp3_stream(
             if item.endpoint:
                 endpoint = str(item.endpoint).rstrip("/")
             break
+    # Prefer SuperAdmin primary model_id (e.g. Abhishek); gender is only a fallback.
+    resolved_voice = (voice or "").strip() or voice_for_entry(entry)
 
     with azure_slot("tts"):
         if endpoint:
@@ -77,8 +79,8 @@ def synthesize_azure_mp3_stream(
         speech_config.set_speech_synthesis_output_format(
             speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
         )
-        neural = _azure_voice(voice, entry, language=language)
-        xml_lang = tts_voice_and_xml_lang(language, voice)[1]
+        neural = _azure_voice(resolved_voice, entry, language=language)
+        xml_lang = tts_voice_and_xml_lang(language, resolved_voice)[1]
         from agents.interview_agent.tts_service import build_interview_ssml
 
         ssml = build_interview_ssml(cleaned, voice_name=neural, xml_lang=xml_lang)

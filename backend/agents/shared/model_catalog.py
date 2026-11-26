@@ -475,7 +475,24 @@ def voice_for_entry(entry: AICatalogEntry | None) -> str:
     model_id = str(entry.model_id or "").casefold()
     if any(
         token in model_id
-        for token in ("prabhat", "aarav", "kunal", "madhur", "arjun", "rehaan")
+        for token in (
+            "prabhat",
+            "aarav",
+            "kunal",
+            "madhur",
+            "arjun",
+            "rehaan",
+            "abhishek",
+            "anbu",
+            "gilbert",
+            "andrew",
+            "brian",
+            "christopher",
+            "eric",
+            "guy",
+            "ryan",
+            "thomas",
+        )
     ):
         return "male"
     return "female"

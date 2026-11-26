@@ -513,7 +513,8 @@ async def speak_room_text(
     service = InterviewAgentService(db)
     text = (payload.text or "").strip() or None
     question_id = (payload.question_id or "").strip() or None
-    voice = (payload.voice or "female").strip() or "female"
+    # Empty → InterviewAgentService resolves SuperAdmin primary TTS (e.g. Abhishek).
+    voice = (payload.voice or "").strip() or None
     if not text and not question_id:
         raise HTTPException(status_code=400, detail="Provide question_id or text to speak.")
     tts_role = (x_interview_tts_role or "question").strip().lower()
@@ -583,7 +584,7 @@ async def speak_room_text_stream(
     _auth, candidate, _interview = await _authorized_candidate(session_id, db, authorization)
     text = (payload.text or "").strip() or None
     question_id = (payload.question_id or "").strip() or None
-    voice = (payload.voice or "female").strip() or "female"
+    voice = (payload.voice or "").strip() or None
     if not text and not question_id:
         raise HTTPException(status_code=400, detail="Provide question_id or text to speak.")
 
@@ -630,6 +631,11 @@ async def speak_room_text_stream(
     interview_language = language_from_snapshot(
         candidate.evaluation_snapshot if isinstance(candidate.evaluation_snapshot, dict) else {}
     )
+    if not voice:
+        from agents.shared.model_catalog import ordered_targets, voice_for_entry
+
+        targets = ordered_targets("tts", language=interview_language)
+        voice = voice_for_entry(targets[0]) if targets else None
 
     def _iter():
         yield from synthesize_azure_mp3_stream(

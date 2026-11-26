@@ -170,7 +170,8 @@ class InterviewSessionStateResponse(BaseModel):
 class SpeakRequest(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     question_id: str | None = None
-    voice: str | None = Field(default="female", description="female | male")
+    # None = resolve from SuperAdmin TTS primary (do not hardcode female).
+    voice: str | None = Field(default=None, description="female | male | omit for catalog default")
     # When true with question_id, prefer streaming MP3 path if enabled.
     stream: bool = False
 

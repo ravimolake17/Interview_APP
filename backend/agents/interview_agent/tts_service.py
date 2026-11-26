@@ -190,9 +190,23 @@ def _truncate_for_parler(text: str) -> str:
 
 def _normalize_voice(voice: str | None) -> str:
     raw = (voice or TTS_VOICE).strip().lower() or "female"
-    if raw in {"f", "woman", "lady", "mary", "neerja"}:
+    if raw in {"f", "woman", "lady", "mary", "neerja", "swara", "aarti"}:
         return "female"
-    if raw in {"m", "man", "thoma", "prabhat", "male_voice"}:
+    if raw in {
+        "m",
+        "man",
+        "thoma",
+        "prabhat",
+        "male_voice",
+        "abhishek",
+        "arjun",
+        "aarav",
+        "madhur",
+        "kunal",
+        "rehaan",
+    }:
+        return "male"
+    if "abhishek" in raw or "prabhat" in raw or "arjun" in raw:
         return "male"
     if raw in _VOICE_DESCRIPTIONS:
         return raw

@@ -15,11 +15,11 @@ from agents.shared.llama_client import call_llama_json, llama_available
 logger = logging.getLogger(__name__)
 
 # Keep the wrap-up short — each turn can cost an LLM call.
-MAX_QNA_TURNS = 2
+MAX_QNA_TURNS = 3
 
 QNA_OPENING = (
-    "Those were my interview questions. You may ask one brief question about the role "
-    "or next steps, or say you are done."
+    "Those were my interview questions. You may ask up to three brief questions about "
+    "the role, department, or next steps, or say you are done."
 )
 
 CLOSING_THANK_YOU = (
@@ -44,8 +44,8 @@ _UNKNOWN_REPLY = (
 )
 
 _HINDI_QNA_OPENING = (
-    "मेरे इंटरव्यू के प्रश्न पूरे हुए। आप भूमिका या अगले चरणों के बारे में एक छोटा "
-    "प्रश्न पूछ सकते हैं, या बता सकते हैं कि आपके कोई प्रश्न नहीं हैं।"
+    "मेरे इंटरव्यू के प्रश्न पूरे हुए। आप भूमिका, विभाग या अगले चरणों के बारे में "
+    "अधिकतम तीन छोटे प्रश्न पूछ सकते हैं, या बता सकते हैं कि आपके कोई प्रश्न नहीं हैं।"
 )
 
 _HINDI_CLOSING_THANK_YOU = (
@@ -109,7 +109,7 @@ _UNKNOWN_INTERNAL_PATTERNS = re.compile(
 )
 
 _QNA_SYSTEM = """You are an AI interviewer wrapping up a job interview briefly.
-Keep replies to 1–2 short spoken sentences. Do not chat or invite more questions.
+Keep replies to 1–2 short spoken sentences.
 
 Return JSON only:
 {
@@ -118,13 +118,15 @@ Return JSON only:
   "reply": "1 to 2 spoken sentences"
 }
 
-Set closing=true when the candidate is finished, says thank you, repeats a prior question,
-asks something off-topic, or this is the last allowed turn.
+Set closing=true only when the candidate is finished, says thank you / no more questions,
+repeats a prior question, asks something declined, or this is the last allowed turn.
+Otherwise set closing=false so they can ask another brief question.
 
 REFERENCE TEXTS are the only source of truth. Paraphrase; do not invent facts.
 
 Still unknown (do not guess): salaries, CTC, named managers, exact headcount,
-reporting lines, office seating, shifts — say HR can follow up, then close.
+reporting lines, office seating, shifts — say HR can follow up. Do not close unless
+this is the last allowed turn or the candidate says they are done.
 
 Safe topics only: role (from reference), department (from reference), company intro
 (from reference), and that HR shares next steps.
@@ -280,11 +282,12 @@ def generate_candidate_qna_reply(
     language = normalize_interview_language(interview_language)
     texts = _localized_qna_text(language)
     text = (candidate_text or "").strip()
-    # Last allowed turn, farewell, or a repeat → close without more chat.
-    if is_closing_utterance(text) or turn >= MAX_QNA_TURNS:
+    # Past the last allowed turn, farewell, or a repeat → close without more chat.
+    if is_closing_utterance(text) or turn > MAX_QNA_TURNS:
         return {"closing": True, "allowed": True, "reply": texts["closing"]}
     if looks_repeated_qna(text, prior_answers):
         return {"closing": True, "allowed": True, "reply": texts["wrap_up"]}
+    last_turn = turn >= MAX_QNA_TURNS
 
     if looks_controversial(text):
         return {
@@ -294,12 +297,9 @@ def generate_candidate_qna_reply(
         }
 
     if _HARD_UNKNOWN.search(text) or looks_unknown_internal(text):
-        # One short unknown reply, then end — avoid multi-turn salary/next-step loops.
-        return {
-            "closing": True,
-            "allowed": True,
-            "reply": f"{texts['unknown']} {texts['wrap_up']}",
-        }
+        # Answer the unknown; only wrap up on the last allowed turn.
+        reply = texts["unknown"] if not last_turn else f"{texts['unknown']} {texts['wrap_up']}"
+        return {"closing": last_turn, "allowed": True, "reply": reply}
 
     refs = _reference_block(
         role_summary=role_summary,
@@ -320,9 +320,8 @@ def generate_candidate_qna_reply(
         else None
     )
     if brief_reply:
-        closing = turn >= MAX_QNA_TURNS - 1
-        reply = brief_reply if not closing else f"{brief_reply} {texts['wrap_up']}"
-        return {"closing": closing, "allowed": True, "reply": reply}
+        reply = brief_reply if not last_turn else f"{brief_reply} {texts['wrap_up']}"
+        return {"closing": last_turn, "allowed": True, "reply": reply}
 
     if llama_available():
         try:
@@ -330,7 +329,8 @@ def generate_candidate_qna_reply(
                 f"{_QNA_SYSTEM}\n\nLANGUAGE LOCK:\n{prompt_language_instruction(language)}",
                 (
                     f"Job position: {job_position or 'the open role'}\n"
-                    f"Q&A turn: {turn} of {MAX_QNA_TURNS} — close after this if possible\n"
+                    f"Q&A turn: {turn} of {MAX_QNA_TURNS}"
+                    f"{' — this is the last allowed turn, set closing=true' if last_turn else ' — leave closing=false unless they say they are done'}\n"
                     f"REFERENCE TEXTS:\n{refs}\n\n"
                     f"Candidate said: {text}\n\n"
                     "The candidate's language must not change the locked reply language."
@@ -338,7 +338,7 @@ def generate_candidate_qna_reply(
                 temperature=0.2,
                 max_tokens=180,
             )
-            closing = bool(data.get("closing")) or turn >= MAX_QNA_TURNS - 1
+            closing = True if last_turn else bool(data.get("closing"))
             allowed = bool(data.get("allowed", True))
             reply = str(data.get("reply") or "").strip()
             if not allowed:
@@ -349,9 +349,9 @@ def generate_candidate_qna_reply(
             if not reply:
                 reply = texts["wrap_up"]
                 closing = True
-            if _HARD_UNKNOWN.search(text):
-                reply = f"{texts['unknown']} {texts['wrap_up']}"
-                closing = True
+            if _HARD_UNKNOWN.search(text) or looks_unknown_internal(text):
+                reply = texts["unknown"] if not last_turn else f"{texts['unknown']} {texts['wrap_up']}"
+                closing = last_turn
             return {"closing": closing, "allowed": allowed, "reply": reply}
         except Exception:
             logger.exception("Candidate Q&A LLM reply failed; using fallback.")

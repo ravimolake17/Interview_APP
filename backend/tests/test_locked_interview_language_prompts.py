@@ -27,9 +27,20 @@ def test_candidate_qna_hindi_static_templates():
     unknown = generate_candidate_qna_reply(
         "What is the salary?",
         interview_language="hi",
+        turn=1,
     )
-    assert unknown["closing"] is True
+    # Early turns stay open so the candidate can ask another role question.
+    assert unknown["closing"] is False
     assert "मेरे पास" in unknown["reply"]
+    assert "नमस्कार" not in unknown["reply"]
+
+    last_unknown = generate_candidate_qna_reply(
+        "What is the salary?",
+        interview_language="hi",
+        turn=3,
+    )
+    assert last_unknown["closing"] is True
+    assert "मेरे पास" in last_unknown["reply"]
 
 
 def test_candidate_qna_dynamic_prompt_locks_selected_language(monkeypatch):

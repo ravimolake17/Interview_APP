@@ -381,7 +381,7 @@ async def speak_text(
     service = InterviewAgentService(db)
     text = (payload.text or "").strip() or None
     question_id = (payload.question_id or "").strip() or None
-    voice = (payload.voice or "female").strip() or "female"
+    voice = (payload.voice or "").strip() or None
     if not text and not question_id:
         raise HTTPException(status_code=400, detail="Provide question_id or text to speak.")
 
